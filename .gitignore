@@ -1,0 +1,15 @@
+node_modules/
+.npm-cache/
+dist/
+out/
+.next/
+release/
+src-tauri/target/
+*.log
+*.tsbuildinfo
+*.db
+*.db-shm
+*.db-wal
+coverage/
+.env
+.DS_Store

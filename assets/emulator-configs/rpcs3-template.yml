@@ -1,0 +1,17 @@
+Core:
+  PPU Decoder: Recompiler (LLVM)
+  SPU Decoder: Recompiler (LLVM)
+  Preferred SPU Threads: {{cpu_threads}}
+  SPU Block Size: Safe
+  Accurate xfloat: false
+Video:
+  Renderer: {{renderer_backend}}
+  Resolution Scale: {{render_scale}}
+  VSync: {{vsync}}
+  Anisotropic Filter Override: {{texture_filtering}}
+Audio:
+  Renderer: XAudio2
+Input/Output:
+  Keyboard: Basic
+System:
+  Language: English (US)

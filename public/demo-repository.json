@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "id": "retrohydra-demo",
+    "name": "RetroHydra Demo Repository",
+    "version": "1.0.0",
+    "schemaVersion": 1
+  },
+  "system_files": [],
+  "catalog": [
+    {
+      "id": "demo-homebrew",
+      "platform": "nes",
+      "title": "Demo Homebrew Entry",
+      "description": "A harmless demo catalog item for checking repository connection flow.",
+      "downloads": [
+        {
+          "kind": "magnet",
+          "uri": "magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12"
+        }
+      ],
+      "requiredSystemFileIds": []
+    }
+  ]
+}
