@@ -30,11 +30,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run QA gate
+        run: npm run qa
+
+      - name: Run MVP smoke
+        run: npm run mvp:smoke
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run MVP visual smoke
+        run: npm run mvp:visual
+
+      - name: Validate updater signing secret
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY is required for tagged Windows releases because updater artifacts are enabled. Configure the repository secret or use npm run mvp:release:windows locally for unsigned smoke packaging."
+          }
+
       - name: Build signed NSIS installer
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc
+
+      - name: Run packaged smoke
+        env:
+          RETROHYDRA_RELEASE_DIR: src-tauri/target/x86_64-pc-windows-msvc/release
+        run: npm run mvp:package-smoke
 
       - name: Prepare updater release assets
         shell: pwsh

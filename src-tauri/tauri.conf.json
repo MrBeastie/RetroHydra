@@ -30,6 +30,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": ["profiles/*"],
     "createUpdaterArtifacts": "v1Compatible",
     "category": "Utility",
     "icon": [

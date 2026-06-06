@@ -23,7 +23,7 @@ export function AppShell({
   children
 }: AppShellProps) {
   return (
-    <main className="rh-app">
+    <main className="rh-app" data-testid="app-shell">
       <div className="rh-app-grid">
         <Sidebar
           activeView={activeView}

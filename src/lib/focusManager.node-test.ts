@@ -21,6 +21,7 @@ describe('focus manager', () => {
   it('maps controller-like keyboard actions', () => {
     assert.equal(actionForInput('Enter'), 'activate');
     assert.equal(actionForInput('Escape'), 'back');
+    assert.equal(actionForInput('Backspace'), null);
     assert.equal(actionForInput('KeyX'), null);
     assert.equal(actionForInput('KeyY'), 'menu');
     assert.equal(actionForInput('Tab'), null);

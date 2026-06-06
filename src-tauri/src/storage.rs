@@ -6,9 +6,11 @@ use sha2::{Digest, Sha256};
 
 use crate::schema::{
     AssetInstallation, AssetView, CatalogGameView, DownloadRecord, EmulatorConfig,
-    RepositorySchema, RepositorySummary, TorrentDownloadRecord, TrustedExecutable,
+    ProfileEmulatorConfig, ProfileSystemFileImport, RepositorySchema, RepositorySummary,
+    TorrentDownloadRecord, TrustedExecutable,
 };
 use crate::security::global_id;
+use crate::setup_profiles;
 
 pub struct RepositoryStore {
     conn: Connection,
@@ -69,19 +71,26 @@ impl RepositoryStore {
               description TEXT,
               cover_image_url TEXT,
               trailer_url TEXT,
+              artwork_json TEXT,
+              metadata_json TEXT,
+              content_mode TEXT,
+              setup_profile_id TEXT,
               downloads_json TEXT NOT NULL,
               expected_extensions_json TEXT NOT NULL DEFAULT '[]',
               required_system_file_ids_json TEXT NOT NULL,
+              launch_json TEXT,
               FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS downloads (
               subject_id TEXT PRIMARY KEY,
               subject_type TEXT NOT NULL CHECK (subject_type IN ('asset', 'game')),
-              status TEXT NOT NULL CHECK (status IN ('ready', 'error')),
+              status TEXT NOT NULL CHECK (status IN ('ready', 'completed', 'error')),
               local_path TEXT,
               sha256 TEXT,
               message TEXT,
+              source TEXT NOT NULL DEFAULT 'legacy',
+              magnet_uri TEXT NOT NULL DEFAULT '',
               updated_at TEXT NOT NULL
             );
 
@@ -130,6 +139,27 @@ impl RepositoryStore {
               launch_args_template TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS profile_emulator_configs (
+              profile_id TEXT PRIMARY KEY,
+              platform TEXT NOT NULL,
+              exe_path TEXT,
+              status TEXT NOT NULL CHECK (status IN ('valid', 'missing', 'invalid')),
+              last_validated_at TEXT,
+              version TEXT,
+              launch_args_template TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_system_file_imports (
+              profile_id TEXT NOT NULL,
+              requirement_id TEXT NOT NULL,
+              target_path TEXT,
+              status TEXT NOT NULL CHECK (status IN ('ready', 'missing', 'corrupt', 'error')),
+              sha256 TEXT,
+              verified_at TEXT NOT NULL,
+              message TEXT,
+              PRIMARY KEY (profile_id, requirement_id)
+            );
+
             CREATE TABLE IF NOT EXISTS asset_installations (
               asset_id TEXT PRIMARY KEY,
               target_path TEXT,
@@ -149,14 +179,22 @@ impl RepositoryStore {
             CREATE INDEX IF NOT EXISTS idx_games_repository ON catalog_games(repository_id);
             CREATE INDEX IF NOT EXISTS idx_torrent_downloads_status ON torrent_downloads(status);
             CREATE INDEX IF NOT EXISTS idx_emulator_configs_status ON emulator_configs(status);
+            CREATE INDEX IF NOT EXISTS idx_profile_emulator_configs_status ON profile_emulator_configs(status);
+            CREATE INDEX IF NOT EXISTS idx_profile_system_file_imports_status ON profile_system_file_imports(status);
             "#,
         )?;
 
+        self.migrate_downloads_schema()?;
         self.ensure_column(
             "catalog_games",
             "expected_extensions_json",
             "TEXT NOT NULL DEFAULT '[]'",
         )?;
+        self.ensure_column("catalog_games", "launch_json", "TEXT")?;
+        self.ensure_column("catalog_games", "artwork_json", "TEXT")?;
+        self.ensure_column("catalog_games", "metadata_json", "TEXT")?;
+        self.ensure_column("catalog_games", "content_mode", "TEXT")?;
+        self.ensure_column("catalog_games", "setup_profile_id", "TEXT")?;
         self.ensure_column("repositories", "maintainer", "TEXT")?;
         self.ensure_column("repositories", "homepage_url", "TEXT")?;
         self.ensure_column("repositories", "license", "TEXT")?;
@@ -171,18 +209,86 @@ impl RepositoryStore {
         Ok(())
     }
 
+    fn migrate_downloads_schema(&self) -> rusqlite::Result<()> {
+        let create_sql = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'downloads'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        let columns = self.table_columns("downloads")?;
+        let has_completed_status = create_sql.contains("'completed'");
+        let has_source = columns.iter().any(|column| column == "source");
+        let has_magnet_uri = columns.iter().any(|column| column == "magnet_uri");
+
+        if has_completed_status && has_source && has_magnet_uri {
+            return Ok(());
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.conn.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS downloads_next;
+                CREATE TABLE downloads_next (
+                  subject_id TEXT PRIMARY KEY,
+                  subject_type TEXT NOT NULL CHECK (subject_type IN ('asset', 'game')),
+                  status TEXT NOT NULL CHECK (status IN ('ready', 'completed', 'error')),
+                  local_path TEXT,
+                  sha256 TEXT,
+                  message TEXT,
+                  source TEXT NOT NULL DEFAULT 'legacy',
+                  magnet_uri TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL
+                );
+                "#,
+            )?;
+
+            let source_expr = if has_source { "source" } else { "'legacy'" };
+            let magnet_uri_expr = if has_magnet_uri { "magnet_uri" } else { "''" };
+            self.conn.execute(
+                &format!(
+                    r#"
+                    INSERT INTO downloads_next (
+                      subject_id, subject_type, status, local_path, sha256, message,
+                      source, magnet_uri, updated_at
+                    )
+                    SELECT
+                      subject_id, subject_type, status, local_path, sha256, message,
+                      {source_expr}, {magnet_uri_expr}, updated_at
+                    FROM downloads
+                    "#
+                ),
+                [],
+            )?;
+            self.conn.execute_batch(
+                r#"
+                DROP TABLE downloads;
+                ALTER TABLE downloads_next RENAME TO downloads;
+                "#,
+            )?;
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
     fn ensure_column(
         &self,
         table_name: &str,
         column_name: &str,
         column_definition: &str,
     ) -> rusqlite::Result<()> {
-        let mut statement = self
-            .conn
-            .prepare(&format!("PRAGMA table_info({table_name})"))?;
-        let columns = statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let columns = self.table_columns(table_name)?;
 
         if !columns.iter().any(|column| column == column_name) {
             self.conn.execute(
@@ -192,6 +298,16 @@ impl RepositoryStore {
         }
 
         Ok(())
+    }
+
+    fn table_columns(&self, table_name: &str) -> rusqlite::Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table_name})"))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(columns)
     }
 
     pub fn store_repository(
@@ -301,12 +417,23 @@ impl RepositoryStore {
                 .iter()
                 .map(|asset_id| global_id(&repo.metadata.id, asset_id))
                 .collect::<Vec<_>>();
+            let expected_extensions = if game.expected_extensions.is_empty() {
+                game.setup_profile_id
+                    .as_deref()
+                    .and_then(setup_profiles::get_platform_setup_profile)
+                    .map(|profile| profile.game_files.expected_extensions)
+                    .unwrap_or_default()
+            } else {
+                game.expected_extensions.clone()
+            };
             tx.execute(
                 r#"
                 INSERT INTO catalog_games (
                   id, source_id, repository_id, platform, title, description, cover_image_url,
-                  trailer_url, downloads_json, expected_extensions_json, required_system_file_ids_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                  trailer_url, artwork_json, metadata_json, content_mode, setup_profile_id,
+                  downloads_json, expected_extensions_json, required_system_file_ids_json,
+                  launch_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 "#,
                 params![
                     storage_id,
@@ -317,10 +444,15 @@ impl RepositoryStore {
                     game.description,
                     game.cover_image_url,
                     game.trailer_url,
+                    serde_json::to_string(&game.artwork).map_err(|error| error.to_string())?,
+                    serde_json::to_string(&game.metadata).map_err(|error| error.to_string())?,
+                    game.content_mode.as_deref(),
+                    game.setup_profile_id.as_deref(),
                     serde_json::to_string(&game.downloads).map_err(|error| error.to_string())?,
-                    serde_json::to_string(&game.expected_extensions)
+                    serde_json::to_string(&expected_extensions)
                         .map_err(|error| error.to_string())?,
-                    serde_json::to_string(&required).map_err(|error| error.to_string())?
+                    serde_json::to_string(&required).map_err(|error| error.to_string())?,
+                    serde_json::to_string(&game.launch).map_err(|error| error.to_string())?
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -378,6 +510,44 @@ impl RepositoryStore {
         Ok(changed > 0)
     }
 
+    pub fn delete_game_download_state(&self, game_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM downloads WHERE subject_id = ?1",
+                params![game_id],
+            )
+            .map_err(|error| error.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM torrent_downloads WHERE game_id = ?1",
+                params![game_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_asset_state(&self, asset_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM downloads WHERE subject_id = ?1",
+                params![asset_id],
+            )
+            .map_err(|error| error.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM asset_installations WHERE asset_id = ?1",
+                params![asset_id],
+            )
+            .map_err(|error| error.to_string())?;
+        self.conn
+            .execute(
+                "DELETE FROM trusted_executables WHERE asset_id = ?1",
+                params![asset_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub fn get_repository_url(&self, repository_id: &str) -> Result<Option<String>, String> {
         self.conn
             .query_row(
@@ -396,8 +566,9 @@ impl RepositoryStore {
                 r#"
             SELECT
               g.id, g.source_id, g.repository_id, r.name, g.platform, g.title, g.description,
-              g.cover_image_url, g.trailer_url, g.downloads_json, g.expected_extensions_json,
-              g.required_system_file_ids_json
+              g.cover_image_url, g.trailer_url, g.artwork_json, g.metadata_json, g.content_mode,
+              g.setup_profile_id, g.downloads_json, g.expected_extensions_json,
+              g.required_system_file_ids_json, g.launch_json
             FROM catalog_games g
             JOIN repositories r ON r.id = g.repository_id
             ORDER BY r.name, g.title
@@ -418,8 +589,9 @@ impl RepositoryStore {
                 r#"
             SELECT
               g.id, g.source_id, g.repository_id, r.name, g.platform, g.title, g.description,
-              g.cover_image_url, g.trailer_url, g.downloads_json, g.expected_extensions_json,
-              g.required_system_file_ids_json
+              g.cover_image_url, g.trailer_url, g.artwork_json, g.metadata_json, g.content_mode,
+              g.setup_profile_id, g.downloads_json, g.expected_extensions_json,
+              g.required_system_file_ids_json, g.launch_json
             FROM catalog_games g
             JOIN repositories r ON r.id = g.repository_id
             WHERE g.id = ?1
@@ -462,22 +634,12 @@ impl RepositoryStore {
         self.conn
             .query_row(
                 r#"
-            SELECT subject_id, subject_type, status, local_path, sha256, message, updated_at
+            SELECT subject_id, subject_type, status, local_path, sha256, message, source, magnet_uri, updated_at
             FROM downloads
             WHERE subject_id = ?1
             "#,
                 params![subject_id],
-                |row| {
-                    Ok(DownloadRecord {
-                        subject_id: row.get(0)?,
-                        subject_type: row.get(1)?,
-                        status: row.get(2)?,
-                        local_path: row.get(3)?,
-                        sha256: row.get(4)?,
-                        message: row.get(5)?,
-                        updated_at: row.get(6)?,
-                    })
-                },
+                map_download_row,
             )
             .optional()
             .map_err(|error| error.to_string())
@@ -488,7 +650,7 @@ impl RepositoryStore {
             .conn
             .prepare(
                 r#"
-            SELECT subject_id, subject_type, status, local_path, sha256, message, updated_at
+            SELECT subject_id, subject_type, status, local_path, sha256, message, source, magnet_uri, updated_at
             FROM downloads
             ORDER BY updated_at DESC
             "#,
@@ -510,21 +672,77 @@ impl RepositoryStore {
         sha256: Option<&str>,
         message: Option<&str>,
     ) -> Result<DownloadRecord, String> {
-        let now = Utc::now().to_rfc3339();
         let status = if message.is_some() { "error" } else { "ready" };
+        self.upsert_download(
+            subject_id,
+            subject_type,
+            status,
+            local_path,
+            sha256,
+            message,
+            "legacy",
+            "",
+        )
+    }
+
+    pub fn record_imported_asset_download(
+        &self,
+        asset_id: &str,
+        local_path: &str,
+        sha256: Option<&str>,
+    ) -> Result<DownloadRecord, String> {
+        self.upsert_download(
+            asset_id,
+            "asset",
+            "completed",
+            Some(local_path),
+            sha256,
+            None,
+            "user_import",
+            "",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_download(
+        &self,
+        subject_id: &str,
+        subject_type: &str,
+        status: &str,
+        local_path: Option<&str>,
+        sha256: Option<&str>,
+        message: Option<&str>,
+        source: &str,
+        magnet_uri: &str,
+    ) -> Result<DownloadRecord, String> {
+        let now = Utc::now().to_rfc3339();
         self.conn.execute(
             r#"
-            INSERT INTO downloads (subject_id, subject_type, status, local_path, sha256, message, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO downloads (
+              subject_id, subject_type, status, local_path, sha256, message, source, magnet_uri, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(subject_id) DO UPDATE SET
               subject_type = excluded.subject_type,
               status = excluded.status,
               local_path = excluded.local_path,
               sha256 = excluded.sha256,
               message = excluded.message,
+              source = excluded.source,
+              magnet_uri = excluded.magnet_uri,
               updated_at = excluded.updated_at
             "#,
-            params![subject_id, subject_type, status, local_path, sha256, message, now],
+            params![
+                subject_id,
+                subject_type,
+                status,
+                local_path,
+                sha256,
+                message,
+                source,
+                magnet_uri,
+                now
+            ],
         ).map_err(|error| error.to_string())?;
 
         self.get_download(subject_id)?
@@ -698,6 +916,7 @@ impl RepositoryStore {
             .ok_or_else(|| format!("Unknown torrent download: {game_id}"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_torrent_progress(
         &self,
         game_id: &str,
@@ -794,16 +1013,13 @@ impl RepositoryStore {
         Ok(record)
     }
 
-    pub fn record_direct_game_download_completed(
+    pub fn record_direct_game_download_started(
         &self,
         game_id: &str,
         source_kind: &str,
-        local_path: &str,
-        sha256: &str,
+        target_path: &str,
         total_bytes: u64,
-    ) -> Result<(DownloadRecord, TorrentDownloadRecord), String> {
-        let download =
-            self.record_download(game_id, "game", Some(local_path), Some(sha256), None)?;
+    ) -> Result<TorrentDownloadRecord, String> {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
@@ -813,7 +1029,7 @@ impl RepositoryStore {
               downloaded_bytes, total_bytes, download_speed_bytes_per_sec,
               upload_speed_bytes_per_sec, peers_count, torrent_id, error_message,
               created_at, updated_at, completed_at
-            ) VALUES (?1, ?2, ?3, 'completed', 100, ?4, ?4, 0, 0, 0, NULL, NULL, ?5, ?5, ?5)
+            ) VALUES (?1, ?2, ?3, 'downloading', 0, 0, ?4, 0, 0, 0, NULL, NULL, ?5, ?5, NULL)
             ON CONFLICT(game_id) DO UPDATE SET
               magnet_uri = excluded.magnet_uri,
               save_dir = excluded.save_dir,
@@ -832,16 +1048,51 @@ impl RepositoryStore {
                 params![
                     game_id,
                     format!("direct:{source_kind}"),
-                    local_path,
+                    target_path,
                     u64_to_i64(total_bytes),
                     now
                 ],
             )
             .map_err(|error| error.to_string())?;
 
-        let torrent = self
-            .get_torrent_download(game_id)?
-            .ok_or_else(|| "Direct download record was not persisted.".to_string())?;
+        self.get_torrent_download(game_id)?
+            .ok_or_else(|| "Direct download record was not persisted.".to_string())
+    }
+
+    pub fn record_direct_game_download_failed(
+        &self,
+        game_id: &str,
+        source_kind: &str,
+        target_path: &str,
+        total_bytes: u64,
+        error: &str,
+    ) -> Result<TorrentDownloadRecord, String> {
+        self.record_download(game_id, "game", None, None, Some(error))?;
+        self.record_direct_game_download_started(game_id, source_kind, target_path, total_bytes)?;
+        self.set_torrent_status(game_id, "error", Some(error))
+    }
+
+    pub fn record_direct_game_download_completed(
+        &self,
+        game_id: &str,
+        source_kind: &str,
+        local_path: &str,
+        sha256: &str,
+        total_bytes: u64,
+    ) -> Result<(DownloadRecord, TorrentDownloadRecord), String> {
+        let download =
+            self.record_download(game_id, "game", Some(local_path), Some(sha256), None)?;
+        self.record_direct_game_download_started(game_id, source_kind, local_path, total_bytes)?;
+        let torrent = self.update_torrent_progress(
+            game_id,
+            "completed",
+            100.0,
+            total_bytes,
+            total_bytes,
+            0,
+            0,
+            0,
+        )?;
         Ok((download, torrent))
     }
 
@@ -929,6 +1180,39 @@ impl RepositoryStore {
             .map_err(|error| error.to_string())
     }
 
+    pub fn get_emulator_exe_path(
+        &self,
+        platform: &str,
+        profile_id: Option<&str>,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let profile_path = match profile_id {
+            Some(profile_id) => self
+                .get_profile_emulator_config(profile_id)?
+                .filter(|config| config.status == "valid")
+                .and_then(|config| config.exe_path),
+            None => None,
+        };
+        let path = profile_path.or_else(|| {
+            self.get_emulator_config(platform)
+                .ok()
+                .flatten()
+                .filter(|config| config.status == "valid")
+                .and_then(|config| config.exe_path)
+        });
+
+        Ok(path
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_file()))
+    }
+
+    pub fn is_emulator_installed(
+        &self,
+        platform: &str,
+        profile_id: Option<&str>,
+    ) -> Result<bool, String> {
+        Ok(self.get_emulator_exe_path(platform, profile_id)?.is_some())
+    }
+
     pub fn upsert_emulator_config(
         &self,
         platform: &str,
@@ -977,6 +1261,83 @@ impl RepositoryStore {
         Ok(changed > 0)
     }
 
+    pub fn list_profile_emulator_configs(&self) -> Result<Vec<ProfileEmulatorConfig>, String> {
+        let mut statement = self
+            .conn
+            .prepare(
+                r#"
+            SELECT profile_id, platform, exe_path, status, last_validated_at, version, launch_args_template
+            FROM profile_emulator_configs
+            ORDER BY profile_id
+            "#,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = statement
+            .query_map([], map_profile_emulator_config_row)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn get_profile_emulator_config(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<ProfileEmulatorConfig>, String> {
+        self.conn
+            .query_row(
+                r#"
+            SELECT profile_id, platform, exe_path, status, last_validated_at, version, launch_args_template
+            FROM profile_emulator_configs
+            WHERE profile_id = ?1
+            "#,
+                params![profile_id],
+                map_profile_emulator_config_row,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn upsert_profile_emulator_config(
+        &self,
+        profile_id: &str,
+        platform: &str,
+        exe_path: Option<&str>,
+        status: &str,
+        version: Option<&str>,
+        launch_args_template: Option<&str>,
+    ) -> Result<ProfileEmulatorConfig, String> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO profile_emulator_configs (
+              profile_id, platform, exe_path, status, last_validated_at, version, launch_args_template
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(profile_id) DO UPDATE SET
+              platform = excluded.platform,
+              exe_path = excluded.exe_path,
+              status = excluded.status,
+              last_validated_at = excluded.last_validated_at,
+              version = excluded.version,
+              launch_args_template = excluded.launch_args_template
+            "#,
+                params![
+                    profile_id,
+                    platform,
+                    exe_path,
+                    status,
+                    now,
+                    version,
+                    launch_args_template
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        self.get_profile_emulator_config(profile_id)?
+            .ok_or_else(|| "Profile emulator config was not persisted.".to_string())
+    }
+
     pub fn get_asset_installation(
         &self,
         asset_id: &str,
@@ -993,6 +1354,83 @@ impl RepositoryStore {
             )
             .optional()
             .map_err(|error| error.to_string())
+    }
+
+    pub fn list_profile_system_file_imports(&self) -> Result<Vec<ProfileSystemFileImport>, String> {
+        let mut statement = self
+            .conn
+            .prepare(
+                r#"
+            SELECT profile_id, requirement_id, target_path, status, sha256, verified_at, message
+            FROM profile_system_file_imports
+            ORDER BY profile_id, requirement_id
+            "#,
+            )
+            .map_err(|error| error.to_string())?;
+
+        let rows = statement
+            .query_map([], map_profile_system_file_import_row)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn get_profile_system_file_import(
+        &self,
+        profile_id: &str,
+        requirement_id: &str,
+    ) -> Result<Option<ProfileSystemFileImport>, String> {
+        self.conn
+            .query_row(
+                r#"
+            SELECT profile_id, requirement_id, target_path, status, sha256, verified_at, message
+            FROM profile_system_file_imports
+            WHERE profile_id = ?1 AND requirement_id = ?2
+            "#,
+                params![profile_id, requirement_id],
+                map_profile_system_file_import_row,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn record_profile_system_file_import(
+        &self,
+        profile_id: &str,
+        requirement_id: &str,
+        target_path: Option<&str>,
+        status: &str,
+        sha256: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<ProfileSystemFileImport, String> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO profile_system_file_imports (
+              profile_id, requirement_id, target_path, status, sha256, verified_at, message
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(profile_id, requirement_id) DO UPDATE SET
+              target_path = excluded.target_path,
+              status = excluded.status,
+              sha256 = excluded.sha256,
+              verified_at = excluded.verified_at,
+              message = excluded.message
+            "#,
+                params![
+                    profile_id,
+                    requirement_id,
+                    target_path,
+                    status,
+                    sha256,
+                    now,
+                    message
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        self.get_profile_system_file_import(profile_id, requirement_id)?
+            .ok_or_else(|| "Profile system file import was not persisted.".to_string())
     }
 
     pub fn record_asset_installation(
@@ -1081,9 +1519,12 @@ impl RepositoryStore {
 }
 
 fn map_game_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogGameView> {
-    let downloads_json: String = row.get(9)?;
-    let expected_extensions_json: String = row.get(10)?;
-    let required_json: String = row.get(11)?;
+    let artwork_json: Option<String> = row.get(9)?;
+    let metadata_json: Option<String> = row.get(10)?;
+    let downloads_json: String = row.get(13)?;
+    let expected_extensions_json: String = row.get(14)?;
+    let required_json: String = row.get(15)?;
+    let launch_json: Option<String> = row.get(16)?;
     Ok(CatalogGameView {
         id: row.get(0)?,
         source_id: row.get(1)?,
@@ -1094,9 +1535,47 @@ fn map_game_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogGameView> {
         description: row.get(6)?,
         cover_image_url: row.get(7)?,
         trailer_url: row.get(8)?,
+        artwork: artwork_json
+            .as_deref()
+            .filter(|json| !json.trim().is_empty() && json.trim() != "null")
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        metadata: metadata_json
+            .as_deref()
+            .filter(|json| !json.trim().is_empty() && json.trim() != "null")
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        content_mode: row.get(11)?,
+        setup_profile_id: row.get(12)?,
         downloads: serde_json::from_str(&downloads_json).unwrap_or_default(),
         expected_extensions: serde_json::from_str(&expected_extensions_json).unwrap_or_default(),
         required_system_file_ids: serde_json::from_str(&required_json).unwrap_or_default(),
+        launch: launch_json
+            .as_deref()
+            .filter(|json| !json.trim().is_empty() && json.trim() != "null")
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    16,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
     })
 }
 
@@ -1127,7 +1606,9 @@ fn map_download_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadRecord>
         local_path: row.get(3)?,
         sha256: row.get(4)?,
         message: row.get(5)?,
-        updated_at: row.get(6)?,
+        source: row.get(6)?,
+        magnet_uri: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -1177,6 +1658,20 @@ fn map_emulator_config_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Emulator
     })
 }
 
+fn map_profile_emulator_config_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProfileEmulatorConfig> {
+    Ok(ProfileEmulatorConfig {
+        profile_id: row.get(0)?,
+        platform: row.get(1)?,
+        exe_path: row.get(2)?,
+        status: row.get(3)?,
+        last_validated_at: row.get(4)?,
+        version: row.get(5)?,
+        launch_args_template: row.get(6)?,
+    })
+}
+
 fn map_asset_installation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetInstallation> {
     Ok(AssetInstallation {
         asset_id: row.get(0)?,
@@ -1185,6 +1680,20 @@ fn map_asset_installation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset
         sha256: row.get(3)?,
         verified_at: row.get(4)?,
         message: row.get(5)?,
+    })
+}
+
+fn map_profile_system_file_import_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProfileSystemFileImport> {
+    Ok(ProfileSystemFileImport {
+        profile_id: row.get(0)?,
+        requirement_id: row.get(1)?,
+        target_path: row.get(2)?,
+        status: row.get(3)?,
+        sha256: row.get(4)?,
+        verified_at: row.get(5)?,
+        message: row.get(6)?,
     })
 }
 
@@ -1263,6 +1772,10 @@ mod tests {
                 description: None,
                 cover_image_url: None,
                 trailer_url: None,
+                artwork: None,
+                metadata: None,
+                content_mode: None,
+                setup_profile_id: None,
                 downloads: vec![SourceUri::Magnet {
                     uri: "magnet:?xt=urn:btih:abc".to_string(),
                     info_hash: None,
@@ -1270,6 +1783,7 @@ mod tests {
                 }],
                 expected_extensions: vec![".nes".to_string()],
                 required_system_file_ids: vec!["emu".to_string()],
+                launch: None,
             }],
         }
     }
@@ -1425,6 +1939,38 @@ mod tests {
         assert_eq!(torrent.downloaded_bytes, 24_592);
         assert_eq!(torrent.total_bytes, 24_592);
         assert!(torrent.completed_at.is_some());
+    }
+
+    #[test]
+    fn records_direct_download_errors_for_retry() {
+        let dir = tempdir().unwrap();
+        let store = RepositoryStore::open(&dir.path().join("retrohydra.db")).unwrap();
+
+        let started = store
+            .record_direct_game_download_started("repo::game", "http", "F:/Games/game.nes", 24_592)
+            .unwrap();
+        assert_eq!(started.status, "downloading");
+        assert_eq!(started.magnet_uri, "direct:http");
+        assert_eq!(started.total_bytes, 24_592);
+
+        let failed = store
+            .record_direct_game_download_failed(
+                "repo::game",
+                "http",
+                "F:/Games/game.nes",
+                24_592,
+                "Source returned an error",
+            )
+            .unwrap();
+        assert_eq!(failed.status, "error");
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some("Source returned an error")
+        );
+
+        let legacy = store.get_download("repo::game").unwrap().unwrap();
+        assert_eq!(legacy.status, "error");
+        assert_eq!(legacy.message.as_deref(), Some("Source returned an error"));
     }
 
     #[test]

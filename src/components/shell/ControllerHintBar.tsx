@@ -18,11 +18,6 @@ const VIEW_HINTS: Record<LauncherView, Array<{ key: string; label: string; tone:
     { key: 'B', label: 'Home', tone: 'bg-red-500' },
     { key: 'X', label: 'Retry', tone: 'bg-blue-500' }
   ],
-  settings: [
-    { key: 'A', label: 'Open', tone: 'bg-green-500' },
-    { key: 'B', label: 'Home', tone: 'bg-red-500' },
-    { key: 'Y', label: 'Reset', tone: 'bg-yellow-500' }
-  ],
   explore: [
     { key: 'A', label: 'Open', tone: 'bg-green-500' },
     { key: 'B', label: 'Home', tone: 'bg-red-500' }

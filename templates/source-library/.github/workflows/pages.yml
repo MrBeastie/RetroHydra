@@ -1,0 +1,79 @@
+name: Publish RetroHydra source library
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/pages.yml'
+      - '.github/workflows/validate.yml'
+      - 'CONTRIBUTING.md'
+      - 'README.md'
+      - 'repository.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: retrohydra-source-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source library
+        uses: actions/checkout@v4
+        with:
+          path: source-library
+
+      - name: Checkout RetroHydra validator
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR_ORG_OR_USER/RetroHydra
+          path: retrohydra-validator
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: retrohydra-validator/package-lock.json
+
+      - name: Install validator dependencies
+        working-directory: retrohydra-validator
+        run: npm ci
+
+      - name: Validate repository JSON
+        working-directory: retrohydra-validator
+        run: npm run source:validate -- ../source-library/repository.json
+
+      - name: Build static source package
+        shell: bash
+        run: |
+          mkdir -p pages
+          cp source-library/repository.json pages/repository.json
+          cp source-library/README.md pages/README.md
+          cp source-library/CONTRIBUTING.md pages/CONTRIBUTING.md
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

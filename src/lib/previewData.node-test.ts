@@ -28,4 +28,26 @@ describe('preview one-click setup support', () => {
     assert.equal(report.torrent?.status, 'completed');
     assert.equal(launch.executable, 'preview://emulators/Mesen2-2.1.1/Mesen.exe');
   });
+
+  it('runs the full zero-friction install flow', async () => {
+    await previewApi.deleteEmulatorConfig('nes');
+    await previewApi.removeGame('retrohydra_nes_smoke', true);
+
+    const result = await previewApi.installGame('retrohydra_nes_smoke');
+    const emulator = await previewApi.getEmulatorStatus('nes');
+    const setup = await previewApi.getGameSetupState('retrohydra_nes_smoke');
+
+    assert.equal(result.status, 'ready');
+    assert.equal(emulator.installed, true);
+    assert.equal(setup.launch.status, 'ready');
+  });
+
+  it('keeps Switch emulator selection manual', async () => {
+    await previewApi.deleteEmulatorConfig('switch');
+
+    const result = await previewApi.installGame('star-orbit');
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.errorCode, 'switch_emulator_not_configured');
+  });
 });

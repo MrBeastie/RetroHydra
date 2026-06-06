@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import {
   Ban,
   Download as DownloadIcon,
@@ -13,14 +14,22 @@ import {
   X
 } from 'lucide-react';
 import { LaunchErrorModal } from '@/components/LaunchErrorModal';
+import { InstallProgressOverlay } from '@/components/InstallProgressOverlay';
+import { GameArt } from '@/components/shell/GamePoster';
 import { useDownloadState } from '@/hooks/useDownloadState';
 import { api } from '@/lib/api';
+import { isDirectGameDownload } from '@/lib/downloadActions';
 import { normalizeLaunchFailure } from '@/lib/launchErrors';
+import { useInstallGame } from '@/lib/orchestratorApi';
 import { defaultSaveDirForGame } from '@/lib/paths';
-import type { AppSettings } from '@/lib/settings';
+import { getEmulatorConfig, getEmulatorPath, type AppSettings } from '@/lib/settings';
+import { isTauriRuntime } from '@/lib/runtime';
 import type {
   CatalogGame,
+  GameSetupState,
+  GameSetupSystemFileState,
   LaunchFailure,
+  RequirementItem,
   RequirementsReport,
   TorrentDownloadStatus
 } from '@/types/repository';
@@ -52,21 +61,45 @@ export function GameDetailsModal({
   onRefresh
 }: GameDetailsModalProps) {
   const [requirements, setRequirements] = useState<RequirementsReport | null>(null);
+  const [setupState, setSetupState] = useState<GameSetupState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [showSetupDetails, setShowSetupDetails] = useState(false);
   const [defaultSaveDir, setDefaultSaveDir] = useState<string | null>(null);
   const [launchFailure, setLaunchFailure] = useState<LaunchFailure | null>(null);
   const download = useDownloadState(game.id);
-  void settings;
+  const orchestrator = useInstallGame(game.id);
+  const userProvidedGame = isUserProvidedGame(game);
+  const metadataOnlyGame = game.contentMode === 'metadata_only';
+  const emulatorPath = getEmulatorPath(settings, game.platform);
+  const emulatorConfig = getEmulatorConfig(settings, game.platform);
+  const emulatorReady = setupState
+    ? setupState.emulator.status === 'ready'
+    : Boolean(emulatorPath) && (emulatorConfig?.status ?? 'valid') === 'valid';
+  const systemFilesReady = setupState
+    ? setupState.systemFiles.every((item) => !item.required || item.status === 'ready')
+      && setupState.repositoryRequirements.every((item) => item.status === 'ready' && item.trusted)
+    : requirements
+      ? requirements.requirements.every((item) => item.status === 'ready' && item.trusted)
+      : false;
 
   const downloadableSource = useMemo(
-    () => game.downloads.find((source) => source.kind === 'magnet' || source.kind === 'http' || source.kind === 'bundled') ?? null,
-    [game.downloads]
+    () => userProvidedGame || metadataOnlyGame
+      ? null
+      : game.downloads.find((source) => source.kind === 'magnet' || source.kind === 'http' || source.kind === 'bundled') ?? null,
+    [game.downloads, metadataOnlyGame, userProvidedGame]
   );
 
   const loadRequirements = async () => {
     try {
-      setRequirements(await api.checkRequirements(game.id));
+      const setup = await api.getGameSetupState(game.id);
+      setSetupState(setup);
+      setRequirements({
+        gameId: setup.gameId,
+        ready: setup.launch.status === 'ready',
+        gameDownloaded: setup.gameFile.status === 'ready',
+        requirements: setup.repositoryRequirements
+      });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     }
@@ -132,12 +165,132 @@ export function GameDetailsModal({
   };
 
   const handleDownload = async () => {
+    if (userProvidedGame || metadataOnlyGame) {
+      setMessage('Import your local game file from this setup panel.');
+      return;
+    }
     if (!downloadableSource) {
       setMessage('No automatic download source is available for this game.');
       return;
     }
 
     await runDownloadAction('download', () => api.startGameDownload(game.id));
+  };
+
+  const handleInstall = async () => {
+    setMessage(null);
+    try {
+      const result = await orchestrator.install();
+      if (result.status === 'ready') {
+        setMessage('Installation complete. Ready to play.');
+      } else {
+        setShowSetupDetails(true);
+        setMessage(result.message ?? result.errorCode ?? 'Installation needs attention.');
+      }
+      await download.refresh();
+      await loadRequirements();
+      await onRefresh();
+    } catch (error) {
+      setShowSetupDetails(true);
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleImportGame = async () => {
+    const importPath = isTauriRuntime()
+      ? await open({
+        title: `Import ${game.title}`,
+        multiple: false,
+        directory: false
+      })
+      : `F:\\RetroHydra\\Fixtures\\${game.id}${game.expectedExtensions[0] ?? '.rom'}`;
+    if (typeof importPath !== 'string') return;
+
+    await runDownloadAction('import-game', async () => {
+      const report = await api.importGameFile(game.id, importPath);
+      if (report.status === 'error') {
+        throw new Error(`Import failed: ${report.errorCode ?? 'error'}`);
+      }
+      setMessage(report.status === 'already_installed' ? 'Game file is already installed.' : 'Game file imported.');
+    });
+  };
+
+  const handleImportAsset = async (item: RequirementItem) => {
+    if (!isTauriRuntime()) {
+      setMessage('File import is available in the desktop build.');
+      return;
+    }
+
+    setBusy(`asset:${item.asset.id}`);
+    setMessage(null);
+    try {
+      const selected = await open({
+        title: `Import ${item.asset.displayName}`,
+        multiple: false,
+        directory: false
+      });
+      if (typeof selected !== 'string') return;
+
+      const report = await api.importAssetFile(item.asset.id, selected);
+      if (report.status === 'error') {
+        setMessage(`Import failed: ${report.errorCode ?? 'error'}`);
+      } else {
+        setMessage(report.status === 'already_installed' ? 'File is already installed.' : 'File imported.');
+      }
+      await loadRequirements();
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleInstallProfileEmulator = async () => {
+    if (!setupState?.profileId) {
+      onOpenSettings();
+      return;
+    }
+    await run('profile-emulator', () => api.installProfileEmulator(setupState.profileId ?? ''));
+  };
+
+  const handleSelectProfileEmulator = async () => {
+    if (!setupState?.profileId) {
+      onOpenSettings();
+      return;
+    }
+    const selected = isTauriRuntime()
+      ? await open({
+        title: `Select ${setupState.emulator.emulatorName}`,
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Executable', extensions: ['exe'] }]
+      })
+      : `F:\\RetroHydra\\Emulators\\${setupState.profileId}.exe`;
+    if (typeof selected !== 'string') return;
+    await run('profile-emulator', () => api.selectProfileEmulator(setupState.profileId ?? '', selected));
+  };
+
+  const handleImportProfileSystemFile = async (item: GameSetupSystemFileState) => {
+    if (!setupState?.profileId) return;
+    const selected = isTauriRuntime()
+      ? await open({
+        title: `Import ${item.label}`,
+        multiple: false,
+        directory: false,
+        filters: item.expectedExtensions.length > 0
+          ? [{ name: item.label, extensions: item.expectedExtensions.map((extension) => extension.replace(/^\./, '')) }]
+          : undefined
+      })
+      : `F:\\RetroHydra\\System\\${item.id}${item.expectedExtensions[0] ?? '.bin'}`;
+    if (typeof selected !== 'string') return;
+    await run(`profile-file:${item.id}`, async () => {
+      const report = await api.importProfileSystemFile(game.id, item.id, selected);
+      if (report.status === 'error') {
+        throw new Error(`Import failed: ${report.errorCode ?? 'error'}`);
+      }
+      setMessage(report.status === 'already_installed' ? 'System file is already installed.' : 'System file imported.');
+    });
   };
 
   const handlePlay = async () => {
@@ -166,7 +319,9 @@ export function GameDetailsModal({
   const statusMessage = message ?? download.errorMessage;
   const showDownloadPanel = download.isLoading || (status !== null && status !== 'cancelled');
   const canDownload = !download.isLoading && (status === null || status === 'cancelled');
-  const canPlay = download.canPlay && Boolean(saveDir) && Boolean(requirements?.ready) && busy === null;
+  const gameFileReady = setupState ? setupState.gameFile.status === 'ready' : download.canPlay;
+  const launchReady = setupState ? setupState.launch.status === 'ready' : Boolean(requirements?.ready);
+  const canPlay = gameFileReady && launchReady && Boolean(saveDir) && busy === null;
   const downloadTitle = download.isLoading
     ? 'Checking download'
     : status
@@ -175,7 +330,7 @@ export function GameDetailsModal({
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/72 px-5">
-      <section className="max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-white/12 bg-[#141417] shadow-2xl">
+      <section data-testid="game-details-modal" className="relative max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-white/12 bg-[#141417] shadow-2xl">
         <header className="flex items-start gap-4 border-b border-white/10 p-5">
           <div className="min-w-0 flex-1">
             <h2 className="text-2xl font-black">{game.title}</h2>
@@ -193,14 +348,7 @@ export function GameDetailsModal({
         <div className="grid grid-cols-[210px_1fr] gap-5 p-5">
           <div className="overflow-hidden rounded-lg border border-white/10 bg-[#1a1a20]">
             <div className="aspect-[3/4]">
-              {game.coverImageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={game.coverImageUrl} alt="" className="h-full w-full object-cover" />
-              ) : (
-                <div className="grid h-full place-items-center px-4 text-center text-sm font-bold text-white/32">
-                  {game.title}
-                </div>
-              )}
+              <GameArt game={game} className="h-full w-full" />
             </div>
           </div>
 
@@ -208,8 +356,92 @@ export function GameDetailsModal({
             {game.description && (
               <p className="mb-5 text-sm leading-6 text-white/66">{game.description}</p>
             )}
+            {game.metadata && (
+              <div className="mb-5 flex flex-wrap gap-2 text-[11px] font-bold uppercase text-white/50">
+                {game.metadata.releaseYear && <span className="rounded border border-white/10 px-2 py-1">{game.metadata.releaseYear}</span>}
+                {game.metadata.genres?.slice(0, 2).map((genre) => (
+                  <span key={genre} className="rounded border border-white/10 px-2 py-1">{genre}</span>
+                ))}
+                {game.metadata.developer && <span className="rounded border border-white/10 px-2 py-1">{game.metadata.developer}</span>}
+                {game.metadata.players && <span className="rounded border border-white/10 px-2 py-1">{game.metadata.players}</span>}
+              </div>
+            )}
+
+            {showSetupDetails && (
+              <>
+            <div className="mb-5 grid gap-2" data-testid="setup-checklist">
+              <SetupRow
+                label="Emulator"
+                detail={emulatorReady
+                  ? setupState?.emulator.executablePath ?? emulatorPath
+                  : setupState?.emulator.message ?? `Configure ${game.platform.toUpperCase()} emulator`}
+                ready={emulatorReady}
+                actionLabel={emulatorReady
+                  ? undefined
+                  : setupState?.emulator.installMode === 'downloadable'
+                    ? 'Install'
+                    : 'Select'}
+                onAction={setupState?.emulator.installMode === 'downloadable'
+                  ? () => void handleInstallProfileEmulator()
+                  : () => void handleSelectProfileEmulator()}
+                disabled={busy !== null || emulatorReady}
+              />
+              <SetupRow
+                label="System files"
+                detail={setupState
+                  ? `${setupState.systemFiles.filter((item) => item.required).length + setupState.repositoryRequirements.length} required file(s)`
+                  : requirements?.requirements.length ? `${requirements.requirements.length} required file(s)` : 'No extra files required'}
+                ready={systemFilesReady}
+                actionLabel="Re-check"
+                onAction={() => void loadRequirements()}
+                disabled={busy !== null}
+              />
+              <SetupRow
+                label="Game file"
+                detail={gameFileReady
+                  ? setupState?.gameFile.installedPath ?? saveDir ?? 'Imported'
+                  : userProvidedGame ? 'Import your local game file' : 'Download required'}
+                ready={gameFileReady}
+                actionLabel={gameFileReady ? undefined : userProvidedGame ? 'Import' : 'Download'}
+                onAction={userProvidedGame ? () => void handleImportGame() : () => void handleDownload()}
+                disabled={busy !== null || gameFileReady}
+                testId="setup-game-file-row"
+              />
+              <SetupRow
+                label="Launch"
+                detail={launchReady ? 'Ready' : setupState?.launch.blockers[0] ?? 'Complete setup steps first'}
+                ready={launchReady}
+                actionLabel="Re-check"
+                onAction={() => void loadRequirements()}
+                disabled={busy !== null}
+              />
+            </div>
 
             <div className="mb-5 space-y-2">
+              {(setupState?.systemFiles || []).map((item) => (
+                <div key={item.id} className="flex items-center justify-between gap-3 rounded-md bg-black/22 px-3 py-2 text-sm">
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold">{item.label}</div>
+                    <div className="mt-1 truncate text-xs text-white/38">
+                      {item.assetKind} / {item.status === 'ready' ? item.installedPath ?? 'Ready' : item.message ?? 'Missing'}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {item.status === 'ready' ? (
+                      <ShieldCheck className="h-4 w-4 text-hydra-green" />
+                    ) : (
+                      <ShieldAlert className="h-4 w-4 text-amber-200" />
+                    )}
+                    <button
+                      onClick={() => void handleImportProfileSystemFile(item)}
+                      disabled={busy !== null || item.status === 'ready'}
+                      className="h-8 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
+                    >
+                      {busy === `profile-file:${item.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Import'}
+                    </button>
+                  </div>
+                </div>
+              ))}
               {(requirements?.requirements || []).map((item) => (
                 <div key={item.asset.id} className="flex items-center justify-between gap-3 rounded-md bg-black/22 px-3 py-2 text-sm">
                   <div className="min-w-0">
@@ -225,17 +457,23 @@ export function GameDetailsModal({
                       <ShieldAlert className="h-4 w-4 text-amber-200" />
                     )}
                     <button
-                      onClick={() => run(`asset:${item.asset.id}`, () => (
-                        item.status === 'corrupt' || item.status === 'error'
-                          ? api.redownloadAsset(item.asset.id)
-                          : api.downloadAsset(item.asset.id)
-                      ))}
+                      onClick={() => {
+                        if (isUserProvidedRequirement(item)) {
+                          void handleImportAsset(item);
+                          return;
+                        }
+                        void run(`asset:${item.asset.id}`, () => (
+                          item.status === 'corrupt' || item.status === 'error'
+                            ? api.redownloadAsset(item.asset.id)
+                            : api.downloadAsset(item.asset.id)
+                        ));
+                      }}
                       disabled={busy !== null || item.status === 'ready'}
                       className="h-8 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
                     >
                       {busy === `asset:${item.asset.id}` ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : item.status === 'corrupt' || item.status === 'error' ? 'Retry' : 'Download'}
+                      ) : isUserProvidedRequirement(item) ? 'Import' : item.status === 'corrupt' || item.status === 'error' ? 'Retry' : 'Download'}
                     </button>
                     {item.asset.executable && item.downloaded && !item.trusted && (
                       <button
@@ -250,6 +488,8 @@ export function GameDetailsModal({
                 </div>
               ))}
             </div>
+              </>
+            )}
 
             {statusMessage && (
               <div className="mb-4 rounded-md border border-amber-300/24 bg-amber-300/10 px-3 py-2 text-sm text-amber-100">
@@ -288,11 +528,16 @@ export function GameDetailsModal({
                     )}
                     {(status === 'paused' || status === 'interrupted' || status === 'error') && (
                       <button
-                        onClick={() => runDownloadAction('resume', download.resume)}
+                        onClick={() => runDownloadAction(
+                          status === 'error' ? 'retry' : 'resume',
+                          status === 'error' && isDirectGameDownload(game, download.record)
+                            ? () => api.startGameDownload(game.id)
+                            : download.resume
+                        )}
                         disabled={busy !== null}
                         className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
                       >
-                        {busy === 'resume' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
+                        {busy === (status === 'error' ? 'retry' : 'resume') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
                         {status === 'error' ? 'Retry' : 'Resume'}
                       </button>
                     )}
@@ -308,14 +553,35 @@ export function GameDetailsModal({
                     )}
                   </div>
                 </div>
-              ) : (
+              ) : userProvidedGame ? (
                 <button
-                  onClick={handleDownload}
-                  disabled={!canDownload || !downloadableSource || busy !== null}
+                  data-testid="import-game-file"
+                  onClick={() => void handleImportGame()}
+                  disabled={busy !== null || metadataOnlyGame}
                   className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
                 >
-                  {busy === 'download' ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
-                  {downloadableSource ? 'Download' : 'Manual Source'}
+                  {busy === 'import-game' ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
+                  Import Game File
+                </button>
+              ) : (
+                <button
+                  onClick={() => void handleInstall()}
+                  disabled={!canDownload || !downloadableSource || busy !== null || orchestrator.running}
+                  className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
+                >
+                  {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
+                  {downloadableSource ? 'Install' : 'Manual Source'}
+                </button>
+              )}
+
+              {status === 'completed' && !launchReady && !userProvidedGame && (
+                <button
+                  onClick={() => void handleInstall()}
+                  disabled={busy !== null || orchestrator.running}
+                  className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
+                >
+                  {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
+                  Finish Setup
                 </button>
               )}
 
@@ -326,6 +592,13 @@ export function GameDetailsModal({
               >
                 {busy === 'launch' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                 Play
+              </button>
+              <button
+                onClick={() => setShowSetupDetails((current) => !current)}
+                disabled={orchestrator.running}
+                className="ml-2 inline-flex h-10 items-center gap-2 rounded-md border border-white/10 px-4 text-sm font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
+              >
+                {showSetupDetails ? 'Hide Details' : 'Details'}
               </button>
               {(download.canPlay || status === 'completed') && (
                 <button
@@ -352,6 +625,9 @@ export function GameDetailsModal({
             </div>
           </div>
         </div>
+        {orchestrator.running && orchestrator.progress && (
+          <InstallProgressOverlay progress={orchestrator.progress} />
+        )}
       </section>
 
       {launchFailure && (
@@ -386,6 +662,54 @@ function requirementStatusLabel(status: RequirementsReport['requirements'][numbe
     default:
       return 'Missing';
   }
+}
+
+function isUserProvidedRequirement(item: RequirementItem) {
+  return item.asset.sources[0]?.kind === 'user_provided';
+}
+
+function isUserProvidedGame(game: CatalogGame) {
+  return game.contentMode === 'user_provided' || game.downloads.some((source) => source.kind === 'user_provided');
+}
+
+function SetupRow({
+  label,
+  detail,
+  ready,
+  actionLabel,
+  onAction,
+  disabled,
+  testId
+}: {
+  label: string;
+  detail: string;
+  ready: boolean;
+  actionLabel?: string;
+  onAction?: () => void;
+  disabled?: boolean;
+  testId?: string;
+}) {
+  return (
+    <div data-testid={testId} className="flex items-center justify-between gap-3 rounded-md bg-black/22 px-3 py-2 text-sm">
+      <div className="min-w-0">
+        <div className="truncate font-semibold">{label}</div>
+        <div className="mt-1 truncate text-xs text-white/38">{detail}</div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        {actionLabel && onAction && (
+          <button
+            type="button"
+            onClick={onAction}
+            disabled={disabled}
+            className="h-8 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
+          >
+            {actionLabel}
+          </button>
+        )}
+        {ready ? <ShieldCheck className="h-4 w-4 text-hydra-green" /> : <ShieldAlert className="h-4 w-4 text-amber-200" />}
+      </div>
+    </div>
+  );
 }
 
 function formatBytes(bytes: number) {

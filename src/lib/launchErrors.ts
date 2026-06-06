@@ -65,6 +65,13 @@ export function launchFailureView(failure: LaunchFailure): LaunchFailureView {
         actionLabel: 'Re-download',
         actionKind: 'retry-download'
       };
+    case 'GameFileCorrupt':
+      return {
+        title: 'Game file is not playable',
+        message: failure.message ?? 'The downloaded game file failed validation.',
+        actionLabel: 'Re-download',
+        actionKind: 'retry-download'
+      };
     case 'SystemFilesMissing':
       return {
         title: 'System files required',

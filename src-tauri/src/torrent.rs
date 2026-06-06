@@ -29,6 +29,7 @@ const DB_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 const ACTIVE_DOWNLOAD_LIMIT_ERROR: &str =
     "Another torrent download is already active. Please wait for it to finish before starting a new one.";
 
+#[derive(Clone)]
 pub struct TorrentManager {
     session: Arc<Session>,
     records: Arc<Mutex<HashMap<String, TorrentRecord>>>,
@@ -221,6 +222,13 @@ impl TorrentManager {
     }
 
     pub async fn pause_download(&self, game_id: String) -> Result<TorrentDownloadRecord, String> {
+        let persisted = lock_store(&self.store)?
+            .get_torrent_download(&game_id)?
+            .ok_or_else(|| format!("Unknown torrent download: {game_id}"))?;
+        if is_direct_download_record(&persisted) {
+            return Err("Direct downloads cannot be paused.".to_string());
+        }
+
         let handle = {
             let records = self.records.lock().await;
             records
@@ -280,9 +288,12 @@ impl TorrentManager {
 
         let record = {
             let store = lock_store(&self.store)?;
-            store
+            let record = store
                 .get_torrent_download(&game_id)?
                 .ok_or_else(|| format!("Unknown torrent download: {game_id}"))?;
+            if is_direct_download_record(&record) {
+                return Err("Direct downloads must be retried instead of resumed.".to_string());
+            }
             store.set_torrent_status(&game_id, "resolving", None)?
         };
 
@@ -315,6 +326,11 @@ impl TorrentManager {
 
         if record.status == "completed" {
             return Err("Completed downloads cannot be cancelled.".to_string());
+        }
+        if is_direct_download_record(&record) && record.status == "downloading" {
+            return Err(
+                "Direct downloads cannot be cancelled while transfer is active.".to_string(),
+            );
         }
 
         let cancelling =
@@ -379,6 +395,19 @@ impl TorrentManager {
         };
 
         for record in startup_records {
+            if is_direct_download_record(&record) && record.status != "cancelling" {
+                if let Ok(interrupted) = lock_store(&self.store).and_then(|store| {
+                    store.set_torrent_status(
+                        &record.game_id,
+                        "error",
+                        Some("Direct download was interrupted. Retry the download."),
+                    )
+                }) {
+                    emit_download_record(&self.app, &interrupted);
+                }
+                continue;
+            }
+
             match record.status.as_str() {
                 "cancelling" => {
                     let _ = self.finish_startup_cancellation(record).await;
@@ -1039,6 +1068,10 @@ fn lock_store(
 
 fn i64_to_usize(value: i64) -> Option<usize> {
     usize::try_from(value).ok()
+}
+
+fn is_direct_download_record(record: &TorrentDownloadRecord) -> bool {
+    record.magnet_uri.starts_with("direct:")
 }
 
 fn clamp_progress(value: f64) -> f64 {

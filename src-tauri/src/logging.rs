@@ -50,10 +50,7 @@ pub fn tail_log(data_dir: &Path, limit: usize) -> Vec<String> {
         return Vec::new();
     };
     let reader = BufReader::new(file);
-    let mut lines = reader
-        .lines()
-        .map_while(Result::ok)
-        .collect::<Vec<_>>();
+    let mut lines = reader.lines().map_while(Result::ok).collect::<Vec<_>>();
     if lines.len() > limit {
         lines.drain(0..lines.len() - limit);
     }

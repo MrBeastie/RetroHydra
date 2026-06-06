@@ -1,0 +1,99 @@
+{
+  "metadata": {
+    "id": "retrohydra-showcase",
+    "name": "RetroHydra Showcase Metadata",
+    "version": "1.0.0",
+    "schemaVersion": 3,
+    "maintainer": "RetroHydra Team",
+    "homepageUrl": "https://retrohydra.local/showcase",
+    "license": "Metadata-only fictional showcase entries",
+    "trustLevel": "official"
+  },
+  "system_files": [
+    {
+      "id": "switch-user-keys",
+      "platform": "switch",
+      "assetKind": "keys",
+      "displayName": "Switch-compatible user keys",
+      "sources": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import keys from your own legally owned console environment."
+        }
+      ],
+      "installHint": {
+        "target": "app_system",
+        "relativePath": "switch/prod.keys"
+      }
+    }
+  ],
+  "catalog": [
+    {
+      "id": "star-orbit",
+      "platform": "switch",
+      "title": "Star Orbit Prototype",
+      "description": "A fictional modern-console showcase entry for testing user-provided package import.",
+      "artwork": {
+        "cover": "https://example.com/retrohydra/showcase/star-orbit-cover.jpg",
+        "hero": "https://example.com/retrohydra/showcase/star-orbit-hero.jpg",
+        "logo": "https://example.com/retrohydra/showcase/star-orbit-logo.png",
+        "screenshots": [
+          "https://example.com/retrohydra/showcase/star-orbit-screen-1.jpg"
+        ]
+      },
+      "metadata": {
+        "releaseYear": 2026,
+        "developer": "North Pier Interactive",
+        "publisher": "Community Preview",
+        "genres": ["Adventure", "Tech Demo"],
+        "tags": ["user-provided", "showcase"],
+        "players": "1 player",
+        "series": "Star Orbit",
+        "externalIds": {
+          "showcase": "star-orbit"
+        }
+      },
+      "contentMode": "user_provided",
+      "setupProfileId": "switch-manual",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your locally built or legally dumped .nsp/.xci package."
+        }
+      ],
+      "expectedExtensions": [".nsp", ".xci"],
+      "requiredSystemFileIds": ["switch-user-keys"],
+      "launch": {
+        "argsTemplate": "{game_path}"
+      }
+    },
+    {
+      "id": "crystal-caverns",
+      "platform": "gba",
+      "title": "Crystal Caverns DX",
+      "description": "A fictional handheld platformer entry for validating rich catalog artwork and import setup.",
+      "artwork": {
+        "cover": "https://example.com/retrohydra/showcase/crystal-caverns-cover.jpg",
+        "hero": "https://example.com/retrohydra/showcase/crystal-caverns-hero.jpg"
+      },
+      "metadata": {
+        "releaseYear": 2026,
+        "developer": "RetroHydra Labs",
+        "genres": ["Platformer", "Homebrew"],
+        "tags": ["showcase"],
+        "players": "1 player"
+      },
+      "contentMode": "user_provided",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own .gba build or dump."
+        }
+      ],
+      "expectedExtensions": [".gba"],
+      "launch": {
+        "argsTemplate": "{game_path}"
+      }
+    }
+  ]
+}

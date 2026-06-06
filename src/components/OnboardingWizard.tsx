@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { isTauriRuntime } from '@/lib/runtime';
+import { sourceTrustLabel, unknownSourcePrompt } from '@/lib/sourceTrust';
 import {
   MVP_PLATFORMS,
   PLATFORM_DEFAULT_LAUNCH_ARGS,
@@ -133,9 +134,9 @@ export function OnboardingWizard({
         await api.startGameDownload(targetGame.id);
       }
 
-      await onReload();
       await refreshSetupState(targetGame.id);
       setMessage('Playable demo is ready.');
+      await onReload();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -203,12 +204,39 @@ export function OnboardingWizard({
     try {
       const nextPreview = preview ?? await api.previewRepository(repoUrl.trim());
       if (nextPreview.trustLevel === 'unknown') {
-        const confirmed = window.confirm(
-          `Connect unknown repository?\n\n${nextPreview.name}\n${nextPreview.url}\n${nextPreview.catalogCount} games, ${nextPreview.systemFileCount} system files.`
-        );
+        const confirmed = window.confirm(unknownSourcePrompt(nextPreview));
         if (!confirmed) return;
       }
       await api.connectRepository(repoUrl.trim());
+      await onReload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const connectRepositoryFile = async () => {
+    if (!isTauriRuntime()) {
+      setMessage('Local JSON import is available in the desktop build.');
+      return;
+    }
+    setBusy('connect-file');
+    setMessage(null);
+    try {
+      const selected = await open({
+        title: 'Select RetroHydra repository JSON',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Repository JSON', extensions: ['json'] }]
+      });
+      if (typeof selected !== 'string') return;
+      const nextPreview = await api.previewRepositoryFile(selected);
+      if (nextPreview.trustLevel === 'unknown') {
+        const confirmed = window.confirm(unknownSourcePrompt(nextPreview));
+        if (!confirmed) return;
+      }
+      await api.connectRepositoryFile(selected);
       await onReload();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -271,7 +299,7 @@ export function OnboardingWizard({
   };
 
   return (
-    <main className="min-h-screen bg-[#0f0f11] px-6 py-10 text-white">
+    <main className="min-h-screen bg-[#0f0f11] px-6 py-10 text-white" data-testid="onboarding-screen">
       <section className="mx-auto w-full max-w-5xl">
         <div className="mb-8 max-w-3xl">
           <div className="text-xs font-black uppercase tracking-[0.2em] text-hydra-accent">RetroHydra MVP setup</div>
@@ -281,8 +309,8 @@ export function OnboardingWizard({
           </p>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
-          <section className="rounded-lg border border-white/10 bg-white/[0.04] p-5">
+        <div className="grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+          <section className="rounded-lg border border-white/10 bg-white/[0.04] p-5" data-testid="onboarding-demo-card">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <h2 className="text-2xl font-black">Built-in NES Demo</h2>
@@ -314,40 +342,16 @@ export function OnboardingWizard({
             </div>
           </section>
 
-          <section className="rounded-lg border border-white/10 bg-white/[0.035] p-5">
-            <h2 className="text-lg font-black">Manual Controls</h2>
-            <div className="mt-4 space-y-3">
-              <button onClick={connectBuiltInRepository} disabled={busy !== null} className="rh-mini-action">
-                {busy === 'builtin-connect' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                Use built-in demo
-              </button>
-              <button onClick={previewBuiltInRepository} disabled={busy !== null} className="rh-mini-action">
-                {busy === 'builtin-preview' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-                Preview built-in
-              </button>
-              <button onClick={downloadFirstGame} disabled={busy !== null || !demoGame} className="rh-mini-action">
-                {busy === 'download' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                Download demo
-              </button>
+          <section className="rounded-lg border border-white/10 bg-white/[0.035] p-5" data-testid="onboarding-source-card">
+            <div className="flex items-start gap-2">
+              <Link2 className="mt-1 h-4 w-4 text-hydra-accent" />
+              <div>
+                <h2 className="text-lg font-black">Community or User Source</h2>
+                <div className="mt-1 text-sm text-white/46">Connect a community URL or private local JSON.</div>
+              </div>
             </div>
-            {builtInPreview && (
-              <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3 text-xs leading-5 text-white/62">
-                <div className="font-bold text-white">{builtInPreview.name}</div>
-                <div>{builtInPreview.catalogCount} game / {builtInPreview.systemFileCount} system files</div>
-                <div>Trust: {builtInPreview.trustLevel}</div>
-              </div>
-            )}
-          </section>
-        </div>
-
-        <details className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] p-5">
-          <summary className="cursor-pointer text-sm font-black uppercase text-white/70">Advanced repository and emulator setup</summary>
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
-            <StepCard title="Community Repository">
-              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-white/52">
-                <Link2 className="h-3.5 w-3.5" />
-                Repository URL
-              </div>
+            <div className="mt-4">
+              <div className="mb-2 text-xs font-semibold text-white/52">Repository URL</div>
               <input
                 value={repoUrl}
                 onChange={(event) => {
@@ -357,25 +361,28 @@ export function OnboardingWizard({
                 className="h-10 w-full rounded-md border border-white/12 bg-black/24 px-3 text-sm outline-none focus:border-hydra-accent/70"
                 placeholder="https://example.com/repo.json"
               />
-              {preview && (
-                <div className="mt-3 rounded-md border border-white/10 bg-white/[0.04] p-3 text-xs leading-5 text-white/62">
-                  <div className="font-bold text-white">{preview.name}</div>
-                  <div>{preview.catalogCount} games / {preview.systemFileCount} system files</div>
-                  <div>Trust: {preview.trustLevel}</div>
-                  {preview.hasExecutableAssets && <div className="text-amber-100">Contains executable assets</div>}
-                </div>
-              )}
-              <div className="mt-3 flex gap-2">
+              {preview && <OnboardingSourcePreview preview={preview} />}
+              <div className="mt-3 flex flex-wrap gap-2">
                 <button onClick={previewRepository} disabled={busy !== null || !repoUrl.trim()} className="rh-mini-action">
                   {busy === 'preview' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldAlert className="h-3.5 w-3.5" />}
                   Preview
                 </button>
                 <button onClick={connectRepository} disabled={busy !== null || !repoUrl.trim()} className="rh-mini-action">
+                  {busy === 'connect' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Link2 className="h-3.5 w-3.5" />}
                   Connect
                 </button>
+                <button onClick={connectRepositoryFile} disabled={busy !== null} className="rh-mini-action">
+                  {busy === 'connect-file' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                  JSON file
+                </button>
               </div>
-            </StepCard>
+            </div>
+          </section>
+        </div>
 
+        <details className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] p-5">
+          <summary className="cursor-pointer text-sm font-black uppercase text-white/70">Manual emulator and demo tools</summary>
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
             <StepCard title="Manual Emulator">
               <select
                 value={platform}
@@ -402,6 +409,24 @@ export function OnboardingWizard({
                 Save emulator
               </button>
             </StepCard>
+
+            <StepCard title="Demo Utilities">
+              <div className="space-y-3">
+                <button onClick={connectBuiltInRepository} disabled={busy !== null} className="rh-mini-action">
+                  {busy === 'builtin-connect' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  Use built-in demo
+                </button>
+                <button onClick={previewBuiltInRepository} disabled={busy !== null} className="rh-mini-action">
+                  {busy === 'builtin-preview' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldAlert className="h-3.5 w-3.5" />}
+                  Preview built-in
+                </button>
+                <button onClick={downloadFirstGame} disabled={busy !== null || !demoGame} className="rh-mini-action">
+                  {busy === 'download' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  Download demo
+                </button>
+              </div>
+              {builtInPreview && <OnboardingSourcePreview preview={builtInPreview} compact />}
+            </StepCard>
           </div>
         </details>
 
@@ -415,6 +440,37 @@ export function OnboardingWizard({
   );
 }
 
+function OnboardingSourcePreview({
+  preview,
+  compact
+}: {
+  preview: RepositoryPreview;
+  compact?: boolean;
+}) {
+  return (
+    <div className={`${compact ? 'mt-4' : 'mt-3'} rounded-md border border-white/10 bg-white/[0.04] p-3 text-xs leading-5 text-white/62`} data-testid="onboarding-source-preview">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-bold text-white">{preview.name}</div>
+          <div className="truncate text-white/38">{preview.url}</div>
+          <div className="text-[10px] font-black uppercase tracking-wide text-white/32">{sourceTrustLabel(preview.trustLevel)}</div>
+        </div>
+        <span className={`rounded border px-2 py-1 text-[10px] font-black uppercase ${preview.trustLevel === 'unknown' ? 'border-amber-300/24 bg-amber-300/10 text-amber-100' : 'border-hydra-accent/24 bg-hydra-accent/10 text-violet-100'}`}>
+          {preview.trustLevel}
+        </span>
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        <div>{preview.catalogCount} games</div>
+        <div>{preview.systemFileCount} system files</div>
+        <div>Version {preview.version}</div>
+        <div>{shortHash(preview.contentHash)}</div>
+      </div>
+      {preview.hasExecutableAssets && <div className="mt-2 text-amber-100">Contains executable assets</div>}
+      {preview.trustLevel === 'unknown' && <div className="mt-2 text-amber-100">Verify this user source before connecting.</div>}
+    </div>
+  );
+}
+
 function SetupItem({ done, title, detail }: { done: boolean; title: string; detail: string }) {
   return (
     <div className={`rounded-md border p-4 ${done ? 'border-emerald-300/24 bg-emerald-300/10' : 'border-white/10 bg-black/18'}`}>
@@ -425,6 +481,11 @@ function SetupItem({ done, title, detail }: { done: boolean; title: string; deta
       <div className="mt-2 truncate text-xs text-white/46">{detail}</div>
     </div>
   );
+}
+
+function shortHash(value: string) {
+  if (value.length <= 16) return value;
+  return `${value.slice(0, 8)}...${value.slice(-8)}`;
 }
 
 function StepCard({

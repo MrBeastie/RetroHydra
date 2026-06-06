@@ -8,18 +8,24 @@ mod app_update;
 mod builtin_demo;
 mod commands;
 mod downloads;
+mod emulator_profiles;
 mod emulator_setup;
+mod game_files;
+mod github_resolver;
 mod launcher;
 mod logging;
+mod orchestrator;
 mod platform;
 mod schema;
 mod security;
+mod setup_profiles;
 mod storage;
 mod torrent;
 
 use storage::RepositoryStore;
 use torrent::TorrentManager;
 
+#[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Mutex<RepositoryStore>>,
     pub data_dir: PathBuf,
@@ -40,9 +46,29 @@ pub fn run() {
                 .map_err(|error| setup_error(error.to_string()))?;
             std::fs::create_dir_all(&data_dir).map_err(|error| setup_error(error.to_string()))?;
             logging::initialize(&data_dir);
-            let store = Arc::new(Mutex::new(
-                RepositoryStore::open(&data_dir.join("retrohydra.db")).map_err(setup_error)?,
-            ));
+            let mut repository_store =
+                RepositoryStore::open(&data_dir.join("retrohydra.db")).map_err(setup_error)?;
+            match commands::repair_library_state(&mut repository_store, &data_dir) {
+                Ok(report) if report.repaired => {
+                    logging::log_event(
+                        &data_dir,
+                        "library_repaired",
+                        &[(
+                            "repository_id",
+                            report.repository_id.as_deref().unwrap_or(""),
+                        )],
+                    );
+                }
+                Ok(_) => {}
+                Err(message) => {
+                    logging::log_event(
+                        &data_dir,
+                        "library_repair_failed",
+                        &[("message", message.as_str())],
+                    );
+                }
+            }
+            let store = Arc::new(Mutex::new(repository_store));
             let torrents = tauri::async_runtime::block_on(TorrentManager::new(
                 data_dir.join("Torrents"),
                 data_dir.join("torrent-session"),
@@ -62,9 +88,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::preview_repository,
+            commands::preview_repository_file,
             commands::preview_builtin_demo_repository,
             commands::connect_repository,
+            commands::connect_repository_file,
             commands::connect_builtin_demo_repository,
+            commands::repair_library,
             commands::refresh_repository,
             commands::get_onboarding_state,
             commands::list_repositories,
@@ -73,11 +102,18 @@ pub fn run() {
             commands::get_game,
             commands::check_requirements,
             commands::get_library_statuses,
+            commands::list_platform_setup_profiles,
+            commands::get_game_setup_state,
+            commands::install_profile_emulator,
+            commands::select_profile_emulator,
+            commands::import_profile_system_file,
             commands::list_emulator_configs,
             commands::save_emulator_config,
             commands::validate_emulator_config,
             commands::delete_emulator_config,
             commands::download_asset,
+            commands::import_asset_file,
+            commands::import_game_file,
             commands::download_game,
             commands::start_game_download,
             commands::trust_executable,
@@ -89,8 +125,13 @@ pub fn run() {
             commands::open_emulator_folder,
             commands::open_logs_folder,
             commands::run_health_check,
+            commands::get_diagnostics_paths,
             commands::get_diagnostics_bundle,
             launcher::launch_game,
+            orchestrator::install_game,
+            orchestrator::install_emulator,
+            orchestrator::get_emulator_status,
+            orchestrator::get_emulator_install_status,
             torrent::start_magnet_download,
             torrent::get_torrent_status,
             torrent::get_game_download,
@@ -107,6 +148,13 @@ pub fn run() {
         .expect("failed to run RetroHydra");
 }
 
+pub fn run_package_smoke() -> Result<(), String> {
+    let data_dir = std::env::var_os("RETROHYDRA_PACKAGE_SMOKE_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("retrohydra-package-smoke"));
+    commands::run_package_smoke(&data_dir)
+}
+
 fn setup_error(message: String) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, message)
+    std::io::Error::other(message)
 }

@@ -84,7 +84,13 @@ mod tests {
     fn mvp_platform_matrix_has_expected_defaults() {
         assert!(is_mvp_platform("switch"));
         assert!(!is_mvp_platform("dreamcast"));
-        assert_eq!(default_launch_args_template("ps1"), Some("-batch \"{game_path}\""));
-        assert_eq!(platform_config("ps2").map(|config| config.executable_hint), Some("pcsx2-qt.exe"));
+        assert_eq!(
+            default_launch_args_template("ps1"),
+            Some("-batch \"{game_path}\"")
+        );
+        assert_eq!(
+            platform_config("ps2").map(|config| config.executable_hint),
+            Some("pcsx2-qt.exe")
+        );
     }
 }

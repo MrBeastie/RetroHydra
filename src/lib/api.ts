@@ -2,16 +2,28 @@ import { invoke } from '@tauri-apps/api/core';
 import { previewApi } from './previewData.ts';
 import { isPreviewRuntime, isTauriRuntime, requireDesktopBridge } from './runtime.ts';
 import type {
+  EmulatorInstallResult,
+  EmulatorStatus,
+  InstallResult
+} from '@/types/emulatorProfile';
+import type {
   CatalogGame,
   DiagnosticsBundle,
+  DiagnosticsPaths,
   DownloadRecord,
   EmulatorConfig,
+  GameSetupState,
   GameDownloadStartReport,
   HealthReport,
+  ImportAssetFileReport,
+  ImportGameFileReport,
   LibraryGameStatus,
   LaunchReport,
   OnboardingState,
+  PlatformSetupProfile,
+  ProfileEmulatorConfig,
   RecommendedEmulator,
+  RepairLibraryReport,
   RepositoryPreview,
   RepositorySummary,
   RequirementsReport,
@@ -26,9 +38,12 @@ type PreviewHandler = (args: Record<string, unknown>) => Promise<unknown>;
 
 const previewHandlers: Record<string, PreviewHandler> = {
   preview_repository: ({ url }) => previewApi.previewRepository(String(url ?? 'preview://retrohydra')),
+  preview_repository_file: ({ path }) => previewApi.previewRepositoryFile(String(path ?? '')),
   preview_builtin_demo_repository: () => previewApi.previewBuiltInDemoRepository(),
   connect_repository: ({ url }) => previewApi.connectRepository(String(url ?? 'preview://retrohydra')),
+  connect_repository_file: ({ path }) => previewApi.connectRepositoryFile(String(path ?? '')),
   connect_builtin_demo_repository: () => previewApi.connectBuiltInDemoRepository(),
+  repair_library: () => previewApi.repairLibrary(),
   refresh_repository: ({ repositoryId }) => previewApi.refreshRepository(String(repositoryId ?? '')),
   get_onboarding_state: () => previewApi.getOnboardingState(),
   list_repositories: () => previewApi.listRepositories(),
@@ -37,6 +52,22 @@ const previewHandlers: Record<string, PreviewHandler> = {
   get_game: ({ gameId }) => previewApi.getGame(String(gameId ?? '')),
   check_requirements: ({ gameId }) => previewApi.checkRequirements(String(gameId ?? '')),
   get_library_statuses: () => previewApi.getLibraryStatuses(),
+  list_platform_setup_profiles: () => previewApi.listPlatformSetupProfiles(),
+  get_game_setup_state: ({ gameId }) => previewApi.getGameSetupState(String(gameId ?? '')),
+  install_game: ({ gameId }) => previewApi.installGame(String(gameId ?? '')),
+  install_emulator: ({ platform }) => previewApi.installEmulator(String(platform ?? '')),
+  get_emulator_status: ({ platform }) => previewApi.getEmulatorStatus(String(platform ?? '')),
+  get_emulator_install_status: ({ platform }) => previewApi.getEmulatorStatus(String(platform ?? '')),
+  install_profile_emulator: ({ profileId }) => previewApi.installProfileEmulator(String(profileId ?? '')),
+  select_profile_emulator: ({ profileId, executablePath }) => previewApi.selectProfileEmulator(
+    String(profileId ?? ''),
+    String(executablePath ?? '')
+  ),
+  import_profile_system_file: ({ gameId, requirementId, sourcePath }) => previewApi.importProfileSystemFile(
+    String(gameId ?? ''),
+    String(requirementId ?? ''),
+    String(sourcePath ?? '')
+  ),
   list_emulator_configs: () => previewApi.listEmulatorConfigs(),
   get_recommended_emulators: () => previewApi.getRecommendedEmulators(),
   install_recommended_emulator: ({ platform }) => previewApi.installRecommendedEmulator(String(platform ?? '')),
@@ -48,6 +79,14 @@ const previewHandlers: Record<string, PreviewHandler> = {
   validate_emulator_config: ({ platform }) => previewApi.validateEmulatorConfig(String(platform ?? '')),
   delete_emulator_config: ({ platform }) => previewApi.deleteEmulatorConfig(String(platform ?? '')),
   download_asset: ({ assetId }) => previewApi.downloadAsset(String(assetId ?? '')),
+  import_asset_file: ({ assetId, sourcePath }) => previewApi.importAssetFile(
+    String(assetId ?? ''),
+    String(sourcePath ?? '')
+  ),
+  import_game_file: ({ gameId, sourcePath }) => previewApi.importGameFile(
+    String(gameId ?? ''),
+    String(sourcePath ?? '')
+  ),
   download_game: ({ gameId }) => previewApi.downloadGame(String(gameId ?? '')),
   start_game_download: ({ gameId }) => previewApi.startGameDownload(String(gameId ?? '')),
   trust_executable: ({ assetId }) => previewApi.trustExecutable(String(assetId ?? '')),
@@ -59,6 +98,7 @@ const previewHandlers: Record<string, PreviewHandler> = {
   open_emulator_folder: ({ platform }) => previewApi.openEmulatorFolder(String(platform ?? '')),
   open_logs_folder: () => previewApi.openLogsFolder(),
   run_health_check: () => previewApi.runHealthCheck(),
+  get_diagnostics_paths: () => previewApi.getDiagnosticsPaths(),
   get_diagnostics_bundle: () => previewApi.getDiagnosticsBundle(),
   start_magnet_download: ({ gameId, magnetUri, saveDir }) => previewApi.startMagnetDownload(
     String(gameId ?? ''),
@@ -94,14 +134,23 @@ export const api = {
   previewRepository(url: string) {
     return call<RepositoryPreview>('preview_repository', { url });
   },
+  previewRepositoryFile(path: string) {
+    return call<RepositoryPreview>('preview_repository_file', { path });
+  },
   previewBuiltInDemoRepository() {
     return call<RepositoryPreview>('preview_builtin_demo_repository');
   },
   connectRepository(url: string) {
     return call<RepositorySummary>('connect_repository', { url });
   },
+  connectRepositoryFile(path: string) {
+    return call<RepositorySummary>('connect_repository_file', { path });
+  },
   connectBuiltInDemoRepository() {
     return call<RepositorySummary>('connect_builtin_demo_repository');
+  },
+  repairLibrary() {
+    return call<RepairLibraryReport>('repair_library');
   },
   refreshRepository(repositoryId: string) {
     return call<RepositorySummary>('refresh_repository', { repositoryId });
@@ -127,6 +176,30 @@ export const api = {
   getLibraryStatuses() {
     return call<LibraryGameStatus[]>('get_library_statuses');
   },
+  listPlatformSetupProfiles() {
+    return call<PlatformSetupProfile[]>('list_platform_setup_profiles');
+  },
+  getGameSetupState(gameId: string) {
+    return call<GameSetupState>('get_game_setup_state', { gameId });
+  },
+  installGame(gameId: string) {
+    return call<InstallResult>('install_game', { gameId });
+  },
+  installEmulator(platform: string) {
+    return call<EmulatorInstallResult>('install_emulator', { platform });
+  },
+  getEmulatorStatus(platform: string) {
+    return call<EmulatorStatus>('get_emulator_status', { platform });
+  },
+  installProfileEmulator(profileId: string) {
+    return call<ProfileEmulatorConfig>('install_profile_emulator', { profileId });
+  },
+  selectProfileEmulator(profileId: string, executablePath: string) {
+    return call<ProfileEmulatorConfig>('select_profile_emulator', { profileId, executablePath });
+  },
+  importProfileSystemFile(gameId: string, requirementId: string, sourcePath: string) {
+    return call<ImportAssetFileReport>('import_profile_system_file', { gameId, requirementId, sourcePath });
+  },
   listEmulatorConfigs() {
     return call<EmulatorConfig[]>('list_emulator_configs');
   },
@@ -147,6 +220,12 @@ export const api = {
   },
   downloadAsset(assetId: string) {
     return call<DownloadRecord>('download_asset', { assetId });
+  },
+  importAssetFile(assetId: string, sourcePath: string) {
+    return call<ImportAssetFileReport>('import_asset_file', { assetId, sourcePath });
+  },
+  importGameFile(gameId: string, sourcePath: string) {
+    return call<ImportGameFileReport>('import_game_file', { gameId, sourcePath });
   },
   downloadGame(gameId: string) {
     return call<DownloadRecord>('download_game', { gameId });
@@ -180,6 +259,9 @@ export const api = {
   },
   runHealthCheck() {
     return call<HealthReport>('run_health_check');
+  },
+  getDiagnosticsPaths() {
+    return call<DiagnosticsPaths>('get_diagnostics_paths');
   },
   getDiagnosticsBundle() {
     return call<DiagnosticsBundle>('get_diagnostics_bundle');

@@ -68,15 +68,31 @@ pub async fn install_recommended_emulator(
     platform: String,
     state: State<'_, AppState>,
 ) -> Result<EmulatorConfig, String> {
-    if platform.trim() != MESEN_MANIFEST.platform {
+    let installed = install_recommended_emulator_files(platform.trim(), &state.data_dir).await?;
+    let store = lock_store(&state)?;
+    persist_installed_emulator(&store, installed.manifest, &installed.executable_path)
+}
+
+pub(crate) struct InstalledRecommendedEmulator {
+    manifest: &'static EmulatorManifest,
+    pub executable_path: PathBuf,
+}
+
+pub(crate) async fn install_recommended_emulator_files(
+    platform: &str,
+    data_dir: &Path,
+) -> Result<InstalledRecommendedEmulator, String> {
+    if platform != MESEN_MANIFEST.platform {
         return Err("Automatic setup is currently available only for NES / Mesen2.".to_string());
     }
 
-    let archive_path = download_archive_to_temp_file(&state.data_dir, &MESEN_MANIFEST).await?;
-    let executable_path = install_archive_file(&state.data_dir, &MESEN_MANIFEST, &archive_path)?;
+    let archive_path = download_archive_to_temp_file(data_dir, &MESEN_MANIFEST).await?;
+    let executable_path = install_archive_file(data_dir, &MESEN_MANIFEST, &archive_path)?;
     let _ = fs::remove_file(&archive_path);
-    let store = lock_store(&state)?;
-    persist_installed_emulator(&store, &MESEN_MANIFEST, &executable_path)
+    Ok(InstalledRecommendedEmulator {
+        manifest: &MESEN_MANIFEST,
+        executable_path,
+    })
 }
 
 fn persist_installed_emulator(

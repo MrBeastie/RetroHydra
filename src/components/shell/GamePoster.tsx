@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Download, Play, RotateCw, ShieldAlert } from 'lucide-react';
 import { createGameArt } from '../../lib/gameArt.ts';
@@ -29,7 +30,8 @@ export function GamePoster({
   onFocus
 }: GamePosterProps) {
   const ActionIcon = actionIconFor(item.primaryAction);
-  const progressVisible = item.installed || item.isDownloading || item.isPaused || item.hasError || item.progressPercent > 0;
+  const progressVisible = item.isDownloading || item.isPaused || item.hasError
+    || (item.progressPercent > 0 && item.progressPercent < 100);
 
   return (
     <motion.article
@@ -63,7 +65,7 @@ export function GamePoster({
         <button
           onClick={() => onAction(item)}
           aria-label={item.primaryActionLabel}
-          className={`absolute right-2 grid h-7 w-7 place-items-center rounded-md bg-black/72 text-white opacity-0 backdrop-blur transition hover:bg-hydra-accent group-hover:opacity-100 ${compact ? 'bottom-[44px]' : 'bottom-[54px]'}`}
+          className={`rh-card-action absolute right-2 grid h-7 w-7 place-items-center rounded-md bg-black/72 text-white opacity-0 backdrop-blur transition hover:bg-hydra-accent group-hover:opacity-100 ${compact ? 'bottom-[44px]' : 'bottom-[54px]'}`}
           title={item.primaryActionLabel}
         >
           <ActionIcon className="h-3.5 w-3.5" />
@@ -74,7 +76,7 @@ export function GamePoster({
 }
 
 function actionIconFor(action: PrimaryGameAction) {
-  if (action === 'download') return Download;
+  if (action === 'download' || action === 'import') return Download;
   if (action === 'resume' || action === 'retry') return RotateCw;
   if (action === 'details') return ShieldAlert;
   return Play;
@@ -98,32 +100,42 @@ export function GameArt({
   hero?: boolean;
 }) {
   const generated = createGameArt(game);
+  const imageUrl = hero
+    ? game.artwork?.hero ?? game.coverImageUrl ?? game.artwork?.cover
+    : game.artwork?.cover ?? game.coverImageUrl;
+  const [imageFailed, setImageFailed] = useState(false);
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [imageUrl]);
 
   return (
     <div className={`relative overflow-hidden bg-[#111218] ${className}`}>
-      {game.coverImageUrl ? (
+      <div className="absolute inset-0" style={hero ? generated.heroStyle : generated.posterStyle}>
+        <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.10),transparent_23%),linear-gradient(0deg,rgba(0,0,0,0.34),transparent_44%)]" />
+        {hero ? (
+          <div className="rh-hero-figure">
+            <span>{generated.initials}</span>
+            <small>{PLATFORM_LABELS[game.platform]}</small>
+          </div>
+        ) : (
+          <>
+            <div className="absolute inset-x-4 top-4 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.14em] text-white/56">
+              <span>{game.platform}</span>
+              <span>RH</span>
+            </div>
+            <div className="absolute inset-0 grid place-items-center">
+              <div className="text-center">
+                <div className="text-3xl font-black tracking-normal text-white/90">{generated.initials}</div>
+                <div className="mt-2 max-w-[120px] text-[10px] font-bold uppercase leading-tight text-white/52">{PLATFORM_LABELS[game.platform]}</div>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+      {imageUrl && !imageFailed && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={game.coverImageUrl} alt="" className="h-full w-full object-cover" />
-      ) : (
-        <div className="absolute inset-0" style={hero ? generated.heroStyle : generated.posterStyle}>
-          <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.10),transparent_23%),linear-gradient(0deg,rgba(0,0,0,0.34),transparent_44%)]" />
-          {hero ? (
-            <div className="rh-hero-figure" />
-          ) : (
-            <>
-              <div className="absolute inset-x-4 top-4 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.14em] text-white/56">
-                <span>{game.platform}</span>
-                <span>RH</span>
-              </div>
-              <div className="absolute inset-0 grid place-items-center">
-                <div className="text-center">
-                  <div className="text-3xl font-black tracking-normal text-white/90">{generated.initials}</div>
-                  <div className="mt-2 max-w-[120px] text-[10px] font-bold uppercase leading-tight text-white/52">{PLATFORM_LABELS[game.platform]}</div>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
+        <img src={imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" onError={() => setImageFailed(true)} />
       )}
     </div>
   );

@@ -17,6 +17,7 @@
       "platform": "nes",
       "title": "RetroHydra NES Smoke Demo",
       "description": "First-party NES ROM for validating built-in repository connection, bundled download, SHA-256 verification, health check, and launch preflight without commercial content.",
+      "setupProfileId": "nes-mesen",
       "downloads": [
         {
           "kind": "bundled",

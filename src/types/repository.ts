@@ -3,13 +3,28 @@ import { PLATFORMS, type Platform } from './platform.ts';
 
 const sha256Pattern = /^[a-f0-9]{64}$/i;
 const extensionPattern = /^\.[a-z0-9]+$/i;
+const profileIdPattern = /^[a-z0-9][a-z0-9-]*$/i;
+
+const BUILT_IN_PROFILE_EXTENSIONS: Record<string, { platform: Platform; expectedExtensions: string[] }> = {
+  'nes-mesen': { platform: 'nes', expectedExtensions: ['.nes'] },
+  'snes-mesen': { platform: 'snes', expectedExtensions: ['.sfc', '.smc'] },
+  'n64-rmg': { platform: 'n64', expectedExtensions: ['.z64', '.n64', '.v64'] },
+  'gba-mgba': { platform: 'gba', expectedExtensions: ['.gba'] },
+  'ps2-pcsx2': { platform: 'ps2', expectedExtensions: ['.iso', '.bin', '.img', '.chd'] },
+  'psp-ppsspp': { platform: 'psp', expectedExtensions: ['.iso', '.cso', '.pbp'] },
+  'ps1-manual': { platform: 'ps1', expectedExtensions: ['.cue', '.bin', '.iso', '.img', '.pbp', '.chd'] },
+  'switch-manual': { platform: 'switch', expectedExtensions: ['.nsp', '.xci', '.nca'] },
+  'snes-manual': { platform: 'snes', expectedExtensions: ['.sfc', '.smc'] },
+  'ps2-manual': { platform: 'ps2', expectedExtensions: ['.iso', '.bin', '.img', '.chd'] },
+  'psp-manual': { platform: 'psp', expectedExtensions: ['.iso', '.cso', '.pbp'] }
+};
 
 export interface RepositorySchema {
   metadata: {
     id: string;
     name: string;
     version: string;
-    schemaVersion: 2;
+    schemaVersion: 2 | 3;
     maintainer?: string;
     homepageUrl?: string;
     license?: string;
@@ -28,6 +43,25 @@ export type SourceUri =
   | { kind: 'user_provided'; instructions?: string; sha256?: string; sizeBytes?: number };
 
 export type RepositoryTrustLevel = 'official' | 'community' | 'unknown';
+export type GameContentMode = 'downloadable' | 'user_provided' | 'metadata_only';
+
+export interface GameArtwork {
+  cover?: string;
+  hero?: string;
+  logo?: string;
+  screenshots?: string[];
+}
+
+export interface GameMetadata {
+  releaseYear?: number;
+  developer?: string;
+  publisher?: string;
+  genres?: string[];
+  tags?: string[];
+  players?: string;
+  series?: string;
+  externalIds?: Record<string, string>;
+}
 
 export interface RepositoryAsset {
   id: string;
@@ -49,9 +83,22 @@ export interface RepositoryGame {
   description?: string;
   coverImageUrl?: string;
   trailerUrl?: string;
+  artwork?: GameArtwork;
+  metadata?: GameMetadata;
+  contentMode?: GameContentMode;
+  /** Reserved for the future Platform Setup Profiles step; no runtime behavior in this slice. */
+  setupProfileId?: string;
+  /** Alias used by zero-friction source libraries. Normalized to setupProfileId. */
+  platformProfileId?: string;
   downloads: SourceUri[];
-  expectedExtensions: string[];
+  expectedExtensions?: string[];
   requiredSystemFileIds?: string[];
+  launch?: GameLaunchConfig;
+}
+
+export interface GameLaunchConfig {
+  argsTemplate?: string;
+  preferredFile?: string;
 }
 
 export interface RepositorySummary {
@@ -96,9 +143,15 @@ export interface CatalogGame {
   description?: string;
   coverImageUrl?: string;
   trailerUrl?: string;
+  artwork?: GameArtwork;
+  metadata?: GameMetadata;
+  contentMode?: GameContentMode;
+  /** Reserved for the future Platform Setup Profiles step; no runtime behavior in this slice. */
+  setupProfileId?: string;
   downloads: SourceUri[];
   expectedExtensions: string[];
   requiredSystemFileIds: string[];
+  launch?: GameLaunchConfig;
 }
 
 export interface AssetView {
@@ -122,6 +175,7 @@ export interface RequirementItem {
   trusted: boolean;
   localPath?: string;
   targetPath?: string;
+  checksum?: string | null;
   sha256?: string;
   message?: string;
 }
@@ -144,11 +198,49 @@ export interface LibraryGameStatus {
 export interface DownloadRecord {
   subjectId: string;
   subjectType: 'asset' | 'game';
-  status: 'ready' | 'error';
+  status: 'ready' | 'completed' | 'error';
   localPath?: string;
   sha256?: string;
   message?: string;
+  source: string;
+  magnetUri: string;
   updatedAt: string;
+}
+
+export type ImportAssetFileStatus = 'installed' | 'already_installed' | 'error';
+export type ImportAssetFileErrorCode =
+  | 'unknown_asset'
+  | 'unsupported_target'
+  | 'source_missing'
+  | 'source_not_file'
+  | 'wrong_extension'
+  | 'checksum_mismatch'
+  | 'copy_failed'
+  | 'store_failed';
+
+export interface ImportAssetFileReport {
+  status: ImportAssetFileStatus;
+  installedPath: string;
+  errorCode?: ImportAssetFileErrorCode;
+}
+
+export type ImportGameFileStatus = 'installed' | 'already_installed' | 'error';
+export type ImportGameFileErrorCode =
+  | 'unknown_game'
+  | 'unsupported_target'
+  | 'source_missing'
+  | 'source_not_file'
+  | 'wrong_extension'
+  | 'checksum_mismatch'
+  | 'copy_failed'
+  | 'store_failed';
+
+export interface ImportGameFileReport {
+  status: ImportGameFileStatus;
+  gameId: string;
+  installedPath: string;
+  sha256?: string;
+  errorCode?: ImportGameFileErrorCode;
 }
 
 export interface GameDownloadStartReport {
@@ -267,10 +359,17 @@ export type LaunchFailureKind =
   | 'EmulatorNotConfigured'
   | 'EmulatorFileMissing'
   | 'GameFileMissing'
+  | 'GameFileCorrupt'
   | 'SystemFilesMissing'
   | 'SystemFileCorrupt'
   | 'AlreadyRunning'
   | 'SpawnFailed';
+
+export interface RepairLibraryReport {
+  repaired: boolean;
+  repositoryId?: string | null;
+  removedPaths: string[];
+}
 
 export interface LaunchFailure {
   kind: LaunchFailureKind;
@@ -303,10 +402,118 @@ export interface HealthCheckItem {
 export interface HealthReport {
   generatedAt: string;
   emulators: HealthCheckItem[];
+  platformSetup: HealthCheckItem[];
   systemFiles: HealthCheckItem[];
   gameFiles: HealthCheckItem[];
   repositories: HealthCheckItem[];
   downloader: HealthCheckItem;
+}
+
+export interface PlatformSetupProfile {
+  id: string;
+  platform: Platform;
+  displayName: string;
+  emulator: PlatformSetupEmulator;
+  gameFiles: PlatformSetupGameFiles;
+  systemFiles: ProfileSystemFileRequirement[];
+  launch: PlatformSetupLaunch;
+}
+
+export interface PlatformSetupEmulator {
+  installMode: 'bundled' | 'downloadable' | 'manual';
+  emulatorName: string;
+  executableName?: string | null;
+  executableCandidates: string[];
+  download?: ProfileEmulatorDownload | null;
+}
+
+export interface ProfileEmulatorDownload {
+  url: string;
+  sha256: string;
+  version: string;
+}
+
+export interface PlatformSetupGameFiles {
+  expectedExtensions: string[];
+  allowDirectory: boolean;
+  preferredFilePatterns: string[];
+  validators: string[];
+}
+
+export interface ProfileSystemFileRequirement {
+  id: string;
+  label: string;
+  assetKind: 'bios' | 'firmware' | 'keys' | 'runtime' | string;
+  required: boolean;
+  extensions: string[];
+  targetName?: string | null;
+  checksum?: string | null;
+  sourceMode: 'user_provided';
+  notes?: string | null;
+}
+
+export interface PlatformSetupLaunch {
+  argsTemplate: string;
+  workingDirectory?: string | null;
+  preferredFile?: string | null;
+}
+
+export interface ProfileEmulatorConfig {
+  profileId: string;
+  platform: Platform;
+  exePath?: string | null;
+  status: 'valid' | 'missing' | 'invalid' | string;
+  lastValidatedAt?: string | null;
+  version?: string | null;
+  launchArgsTemplate?: string | null;
+}
+
+export interface GameSetupState {
+  gameId: string;
+  profileId?: string | null;
+  profileDisplayName?: string | null;
+  unsupportedProfileId?: string | null;
+  emulator: GameSetupEmulatorState;
+  systemFiles: GameSetupSystemFileState[];
+  repositoryRequirements: RequirementItem[];
+  gameFile: GameSetupGameFileState;
+  launch: GameSetupLaunchState;
+  primaryAction: 'play' | 'import_game' | 'setup' | 'download' | 'details' | string;
+}
+
+export interface GameSetupEmulatorState {
+  status: 'missing' | 'ready' | 'manual_required' | string;
+  profileId?: string | null;
+  platform: Platform;
+  emulatorName: string;
+  installMode: 'bundled' | 'downloadable' | 'manual' | string;
+  executablePath?: string | null;
+  message?: string | null;
+}
+
+export interface GameSetupSystemFileState {
+  id: string;
+  label: string;
+  assetKind: string;
+  required: boolean;
+  status: 'missing' | 'ready' | 'invalid' | 'corrupt' | 'error' | string;
+  installedPath?: string | null;
+  expectedExtensions: string[];
+  checksum?: string | null;
+  message?: string | null;
+}
+
+export interface GameSetupGameFileState {
+  status: 'missing' | 'ready' | 'invalid' | string;
+  installedPath?: string | null;
+  expectedExtensions: string[];
+  allowDirectory: boolean;
+  message?: string | null;
+}
+
+export interface GameSetupLaunchState {
+  status: 'blocked' | 'ready' | string;
+  blockers: string[];
 }
 
 export interface DiagnosticsBundle {
@@ -318,6 +525,11 @@ export interface DiagnosticsBundle {
   health: HealthReport;
   downloads: TorrentDownloadRecord[];
   logs: string[];
+}
+
+export interface DiagnosticsPaths {
+  dataDir: string;
+  logPath: string;
 }
 
 export type UpdateCheckErrorKind = 'endpointUnreachable' | 'parseError' | 'signatureInvalid';
@@ -371,6 +583,25 @@ export const extensionSchema = z.string()
   .transform((extension) => extension.toLowerCase());
 
 export const platformSchema = z.enum(PLATFORMS);
+export const gameContentModeSchema = z.enum(['downloadable', 'user_provided', 'metadata_only']);
+
+export const gameArtworkSchema = z.object({
+  cover: z.string().url().optional(),
+  hero: z.string().url().optional(),
+  logo: z.string().url().optional(),
+  screenshots: z.array(z.string().url()).optional()
+});
+
+export const gameMetadataSchema = z.object({
+  releaseYear: z.number().int().min(1950).max(2100).optional(),
+  developer: z.string().min(1).optional(),
+  publisher: z.string().min(1).optional(),
+  genres: z.array(z.string().min(1)).optional(),
+  tags: z.array(z.string().min(1)).optional(),
+  players: z.string().min(1).optional(),
+  series: z.string().min(1).optional(),
+  externalIds: z.record(z.string().min(1), z.string().min(1)).optional()
+});
 
 export const repositoryAssetSchema = z.object({
   id: z.string().min(1),
@@ -392,17 +623,53 @@ export const repositoryGameSchema = z.object({
   description: z.string().optional(),
   coverImageUrl: z.string().url().optional(),
   trailerUrl: z.string().url().optional(),
+  artwork: gameArtworkSchema.optional(),
+  metadata: gameMetadataSchema.optional(),
+  contentMode: gameContentModeSchema.optional(),
+  setupProfileId: z.string().regex(profileIdPattern, 'setupProfileId must be a profile id like switch-manual').optional(),
+  platformProfileId: z.string().regex(profileIdPattern, 'platformProfileId must be a profile id like nes-mesen').optional(),
   downloads: z.array(sourceUriSchema).min(1),
-  expectedExtensions: z.array(extensionSchema).min(1),
-  requiredSystemFileIds: z.array(z.string().min(1)).optional()
-});
+  expectedExtensions: z.array(extensionSchema).optional(),
+  requiredSystemFileIds: z.array(z.string().min(1)).optional(),
+  launch: z.object({
+    argsTemplate: z.string().trim().min(1).optional(),
+    preferredFile: z.string()
+      .trim()
+      .min(1)
+      .regex(/^(?!\.?\/)(?!.*\\)(?!.*(?:^|\/)\.\.?(?:\/|$)).+$/, 'preferredFile must be a normalized relative path')
+      .optional()
+  }).optional()
+}).superRefine((game, ctx) => {
+  const profileId = game.platformProfileId ?? game.setupProfileId;
+  const profile = profileId ? BUILT_IN_PROFILE_EXTENSIONS[profileId] : undefined;
+  if (profile && profile.platform !== game.platform) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [game.platformProfileId ? 'platformProfileId' : 'setupProfileId'],
+      message: `profile ${profileId} is for ${profile.platform}, not ${game.platform}`
+    });
+  }
+  if (!game.expectedExtensions?.length && !profile) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['expectedExtensions'],
+      message: 'expectedExtensions is required unless setupProfileId names a built-in profile'
+    });
+  }
+}).transform((game) => ({
+  ...game,
+  setupProfileId: game.platformProfileId ?? game.setupProfileId,
+  expectedExtensions: game.expectedExtensions
+    ?? BUILT_IN_PROFILE_EXTENSIONS[game.platformProfileId ?? game.setupProfileId ?? '']?.expectedExtensions
+    ?? []
+}));
 
 export const repositorySchema = z.object({
   metadata: z.object({
     id: z.string().min(1),
     name: z.string().min(1),
     version: z.string().min(1),
-    schemaVersion: z.literal(2),
+    schemaVersion: z.union([z.literal(2), z.literal(3)]),
     maintainer: z.string().optional(),
     homepageUrl: z.string().url().optional(),
     license: z.string().optional(),

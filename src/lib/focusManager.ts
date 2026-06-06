@@ -19,7 +19,7 @@ export interface FocusActionMap {
 
 export const DEFAULT_FOCUS_ACTIONS: FocusActionMap = {
   activate: ['Enter', 'Space', 'GamepadA'],
-  back: ['Escape', 'Backspace', 'GamepadB'],
+  back: ['Escape', 'GamepadB'],
   menu: ['KeyY', 'GamepadY']
 };
 

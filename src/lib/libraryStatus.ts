@@ -8,7 +8,8 @@ import type {
 } from '../types/repository.ts';
 
 export type LibraryFilter = 'all' | 'installed' | 'downloading' | 'missing';
-export type PrimaryGameAction = 'play' | 'download' | 'resume' | 'retry' | 'details';
+export type LibrarySort = 'title' | 'platform' | 'status' | 'repository';
+export type PrimaryGameAction = 'play' | 'download' | 'import' | 'resume' | 'retry' | 'details';
 export type StatusTone = 'ready' | 'active' | 'paused' | 'error' | 'missing' | 'idle';
 
 const ACTIVE_DOWNLOAD_STATUSES: TorrentDownloadStatus[] = ['resolving', 'downloading', 'cancelling'];
@@ -82,6 +83,7 @@ export function buildGameLibraryItem(
     missingRequirements
   });
   const { primaryAction, primaryActionLabel } = derivePrimaryAction({
+    game,
     downloadStatus,
     readyToPlay,
     isPaused,
@@ -123,6 +125,71 @@ export function filterLibraryItems(items: GameLibraryItem[], filter: LibraryFilt
   }
 }
 
+export function searchAndSortLibraryItems(
+  items: GameLibraryItem[],
+  filter: LibraryFilter,
+  query: string,
+  sort: LibrarySort
+): GameLibraryItem[] {
+  const normalizedQuery = normalizeSearchText(query);
+  const filtered = filterLibraryItems(items, filter);
+  const searched = normalizedQuery
+    ? filtered.filter((item) => matchesLibraryQuery(item, normalizedQuery))
+    : filtered;
+
+  return [...searched].sort((left, right) => compareLibraryItems(left, right, sort));
+}
+
+function matchesLibraryQuery(item: GameLibraryItem, query: string) {
+  return [
+    item.game.title,
+    item.game.platform,
+    item.game.repositoryName,
+    item.game.sourceId,
+    item.game.metadata?.developer ?? '',
+    item.game.metadata?.publisher ?? '',
+    item.game.metadata?.series ?? '',
+    item.game.metadata?.releaseYear ? String(item.game.metadata.releaseYear) : '',
+    ...(item.game.metadata?.genres ?? []),
+    ...(item.game.metadata?.tags ?? []),
+    item.statusLabel,
+    ...item.missingRequirements
+  ].some((value) => normalizeSearchText(value).includes(query));
+}
+
+function compareLibraryItems(left: GameLibraryItem, right: GameLibraryItem, sort: LibrarySort) {
+  if (sort === 'platform') {
+    return compareStrings(left.game.platform, right.game.platform)
+      || compareStrings(left.game.title, right.game.title);
+  }
+  if (sort === 'status') {
+    return statusRank(left) - statusRank(right)
+      || compareStrings(left.game.title, right.game.title);
+  }
+  if (sort === 'repository') {
+    return compareStrings(left.game.repositoryName, right.game.repositoryName)
+      || compareStrings(left.game.title, right.game.title);
+  }
+  return compareStrings(left.game.title, right.game.title);
+}
+
+function statusRank(item: GameLibraryItem) {
+  if (item.readyToPlay) return 0;
+  if (item.isDownloading) return 1;
+  if (item.isPaused) return 2;
+  if (item.hasError) return 3;
+  if (item.installed) return 4;
+  return 5;
+}
+
+function compareStrings(left: string, right: string) {
+  return left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true });
+}
+
+function normalizeSearchText(value: string) {
+  return value.trim().toLocaleLowerCase();
+}
+
 function deriveStatusLabel({
   downloadStatus,
   installed,
@@ -141,6 +208,9 @@ function deriveStatusLabel({
   missingRequirements: string[];
 }): { statusLabel: string; statusTone: StatusTone } {
   if (readyToPlay) return { statusLabel: 'Ready to Play', statusTone: 'ready' };
+  if (installed && missingRequirements.some(isGameFileRequirement)) {
+    return { statusLabel: 'Game File Issue', statusTone: 'error' };
+  }
   if (installed && missingRequirements.length > 0) return { statusLabel: 'Missing Requirements', statusTone: 'missing' };
   if (hasError) return { statusLabel: 'Download Error', statusTone: 'error' };
   if (downloadStatus === 'interrupted') return { statusLabel: 'Interrupted', statusTone: 'paused' };
@@ -154,6 +224,7 @@ function deriveStatusLabel({
 }
 
 function derivePrimaryAction({
+  game,
   downloadStatus,
   readyToPlay,
   isPaused,
@@ -161,6 +232,7 @@ function derivePrimaryAction({
   installed,
   missingRequirements
 }: {
+  game: CatalogGame;
   downloadStatus: TorrentDownloadStatus | null;
   readyToPlay: boolean;
   isPaused: boolean;
@@ -168,16 +240,31 @@ function derivePrimaryAction({
   installed: boolean;
   missingRequirements: string[];
 }): { primaryAction: PrimaryGameAction; primaryActionLabel: string } {
+  const userProvided = isUserProvidedGame(game);
   if (readyToPlay) return { primaryAction: 'play', primaryActionLabel: 'Play' };
   if (hasError) return { primaryAction: 'retry', primaryActionLabel: 'Retry' };
   if (isPaused) return { primaryAction: 'resume', primaryActionLabel: 'Resume' };
   if (downloadStatus === 'resolving' || downloadStatus === 'downloading' || downloadStatus === 'cancelling') {
     return { primaryAction: 'details', primaryActionLabel: 'Details' };
   }
+  if (installed && missingRequirements.some(isGameFileRequirement)) {
+    if (userProvided) return { primaryAction: 'import', primaryActionLabel: 'Import' };
+    return { primaryAction: 'download', primaryActionLabel: 'Re-download' };
+  }
   if (installed && missingRequirements.length > 0) {
     return { primaryAction: 'details', primaryActionLabel: 'Fix Requirements' };
   }
-  return { primaryAction: 'download', primaryActionLabel: 'Download' };
+  if (userProvided) return { primaryAction: 'import', primaryActionLabel: 'Import' };
+  if (game.contentMode === 'metadata_only') return { primaryAction: 'details', primaryActionLabel: 'Details' };
+  return { primaryAction: 'download', primaryActionLabel: 'Install' };
+}
+
+function isGameFileRequirement(message: string) {
+  return message.toLowerCase().startsWith('game file:');
+}
+
+function isUserProvidedGame(game: CatalogGame) {
+  return game.contentMode === 'user_provided' || game.downloads.some((source) => source.kind === 'user_provided');
 }
 
 function clampPercent(value: number) {

@@ -25,6 +25,18 @@ describe('launch error mapping', () => {
     assert.match(view.message, /SCPH1001\.bin/);
   });
 
+  it('maps corrupt game files to re-download action', () => {
+    const view = launchFailureView({
+      kind: 'GameFileCorrupt',
+      gameId: 'repo::game',
+      assets: [],
+      message: 'NES game file does not contain a valid iNES header'
+    });
+
+    assert.equal(view.actionKind, 'retry-download');
+    assert.match(view.message, /iNES header/);
+  });
+
   it('maps string errors to spawn failures', () => {
     const failure = normalizeLaunchFailure('boom');
 

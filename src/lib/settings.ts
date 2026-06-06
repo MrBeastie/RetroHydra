@@ -38,7 +38,11 @@ function getSettingsStore() {
 
 export async function loadSettings(): Promise<AppSettings> {
   if (!isTauriRuntime()) {
-    if (isPreviewRuntime()) return loadPreviewSettings();
+    if (isPreviewRuntime()) {
+      const configs = await api.listEmulatorConfigs();
+      if (configs.length > 0) return settingsFromEmulatorConfigs(configs);
+      return loadPreviewSettings();
+    }
     return requireDesktopBridge('Loading settings');
   }
 
@@ -51,7 +55,21 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
   const normalizedSettings = normalizeSettings(settings);
 
   if (!isTauriRuntime()) {
-    if (isPreviewRuntime()) return savePreviewSettings(normalizedSettings);
+    if (isPreviewRuntime()) {
+      await Promise.all(MVP_PLATFORMS.map((platform) => {
+        const emulatorPath = normalizedSettings.emulators[platform];
+        if (emulatorPath) {
+          return api.saveEmulatorConfig(
+            platform,
+            emulatorPath,
+            normalizedSettings.emulatorConfigs[platform]?.launchArgsTemplate
+          );
+        }
+
+        return api.deleteEmulatorConfig(platform);
+      }));
+      return savePreviewSettings(settingsFromEmulatorConfigs(await api.listEmulatorConfigs()));
+    }
     return requireDesktopBridge('Saving settings');
   }
 

@@ -16,6 +16,7 @@ export default function HomePage() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
+      await api.repairLibrary();
       const [nextRepositories, nextCatalog, nextOnboardingState] = await Promise.all([
         api.listRepositories(),
         api.getCatalog(),

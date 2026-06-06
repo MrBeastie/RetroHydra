@@ -1,5 +1,5 @@
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -8,7 +8,7 @@ use std::time::Instant;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::commands::build_requirements_report;
+use crate::game_files::{self, GamePathErrorKind};
 use crate::AppState;
 
 #[cfg(windows)]
@@ -86,6 +86,17 @@ impl LaunchFailure {
         }
     }
 
+    fn game_file_corrupt(game_id: &str, path: Option<&str>, message: impl Into<String>) -> Self {
+        Self {
+            kind: "GameFileCorrupt".to_string(),
+            platform: None,
+            game_id: Some(game_id.to_string()),
+            path: path.map(ToString::to_string),
+            assets: Vec::new(),
+            message: Some(message.into()),
+        }
+    }
+
     fn system_files_missing(game_id: &str, assets: Vec<String>) -> Self {
         Self {
             kind: "SystemFilesMissing".to_string(),
@@ -132,12 +143,13 @@ impl LaunchFailure {
 }
 
 #[tauri::command]
+#[allow(clippy::result_large_err)]
 pub fn launch_game(
     game_id: String,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<LaunchReport, LaunchFailure> {
-    let (emulator_path, game_path, launch_args_template, expected_extensions) = {
+    let (emulator_path, game_path, launch_args_template, expected_extensions, preferred_file) = {
         let store = state
             .store
             .lock()
@@ -147,13 +159,33 @@ pub fn launch_game(
             .map_err(LaunchFailure::spawn_failed)?
             .ok_or_else(|| LaunchFailure::spawn_failed(format!("Unknown game: {game_id}")))?;
 
-        let config = store
+        let profile = crate::commands::resolve_known_profile(&game);
+        let setup_state = crate::commands::build_game_setup_state(&store, &state.data_dir, &game)
+            .map_err(LaunchFailure::spawn_failed)?;
+        if let Some(profile_id) = setup_state.unsupported_profile_id.as_deref() {
+            return Err(LaunchFailure::spawn_failed(format!(
+                "Unsupported setup profile: {profile_id}"
+            )));
+        }
+
+        let legacy_config = store
             .get_emulator_config(&game.platform)
-            .map_err(LaunchFailure::spawn_failed)?
-            .ok_or_else(|| LaunchFailure::emulator_not_configured(&game.platform))?;
-        let emulator_path = config
-            .exe_path
-            .as_deref()
+            .map_err(LaunchFailure::spawn_failed)?;
+        let profile_config = if let Some(profile) = profile.as_ref() {
+            store
+                .get_profile_emulator_config(&profile.id)
+                .map_err(LaunchFailure::spawn_failed)?
+        } else {
+            None
+        };
+        let emulator_path = profile_config
+            .as_ref()
+            .and_then(|config| config.exe_path.as_deref())
+            .or_else(|| {
+                legacy_config
+                    .as_ref()
+                    .and_then(|config| config.exe_path.as_deref())
+            })
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .ok_or_else(|| LaunchFailure::emulator_not_configured(&game.platform))?
@@ -169,33 +201,38 @@ pub fn launch_game(
             return Err(LaunchFailure::spawn_failed(message));
         }
 
-        let download = store
-            .get_download(&game.id)
-            .map_err(LaunchFailure::spawn_failed)?
-            .filter(|record| record.status == "ready")
-            .and_then(|record| record.local_path);
-        let game_path = download.ok_or_else(|| {
-            LaunchFailure::game_file_missing(&game.id, None, "Game is not downloaded yet.")
-        })?;
+        let game_path = resolve_downloaded_game_path(&store, &game.id)?;
 
-        let requirements = build_requirements_report(&store, &state.data_dir, &game)
-            .map_err(LaunchFailure::spawn_failed)?;
-        let corrupt_assets = requirements
-            .requirements
+        let mut corrupt_assets = setup_state
+            .system_files
             .iter()
-            .filter(|item| item.status == "corrupt")
-            .map(|item| item.asset.display_name.clone())
+            .filter(|item| item.required && item.status == "corrupt")
+            .map(|item| item.label.clone())
             .collect::<Vec<_>>();
+        corrupt_assets.extend(
+            setup_state
+                .repository_requirements
+                .iter()
+                .filter(|item| item.status == "corrupt")
+                .map(|item| item.asset.display_name.clone()),
+        );
         if !corrupt_assets.is_empty() {
             return Err(LaunchFailure::system_file_corrupt(&game.id, corrupt_assets));
         }
 
-        let missing_assets = requirements
-            .requirements
+        let mut missing_assets = setup_state
+            .system_files
             .iter()
-            .filter(|item| item.status != "ready" || !item.trusted)
-            .map(|item| item.asset.display_name.clone())
+            .filter(|item| item.required && item.status != "ready")
+            .map(|item| item.label.clone())
             .collect::<Vec<_>>();
+        missing_assets.extend(
+            setup_state
+                .repository_requirements
+                .iter()
+                .filter(|item| item.status != "ready" || !item.trusted)
+                .map(|item| item.asset.display_name.clone()),
+        );
         if !missing_assets.is_empty() {
             return Err(LaunchFailure::system_files_missing(
                 &game.id,
@@ -203,14 +240,45 @@ pub fn launch_game(
             ));
         }
 
+        let expected_extensions =
+            crate::commands::resolved_expected_extensions(&game, profile.as_ref());
+        let preferred_file = game
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.preferred_file.clone())
+            .or_else(|| {
+                profile
+                    .as_ref()
+                    .and_then(|profile| profile.launch.preferred_file.clone())
+            });
+        let launch_args_template = game
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.args_template.clone())
+            .or_else(|| {
+                profile
+                    .as_ref()
+                    .map(|profile| profile.launch.args_template.clone())
+            })
+            .or_else(|| {
+                profile_config
+                    .as_ref()
+                    .and_then(|config| config.launch_args_template.clone())
+            })
+            .or_else(|| {
+                legacy_config
+                    .as_ref()
+                    .and_then(|config| config.launch_args_template.clone())
+            })
+            .filter(|template| !template.trim().is_empty())
+            .unwrap_or_else(|| "{game_path}".to_string());
+
         (
             emulator_path,
             game_path,
-            config
-                .launch_args_template
-                .filter(|template| !template.trim().is_empty())
-                .unwrap_or_else(|| "{game_path}".to_string()),
-            game.expected_extensions,
+            launch_args_template,
+            expected_extensions,
+            preferred_file,
         )
     };
 
@@ -224,10 +292,21 @@ pub fn launch_game(
         }
     }
 
-    let expected_extensions =
-        normalize_expected_extensions(&expected_extensions).map_err(LaunchFailure::spawn_failed)?;
-    let resolved_game_path = resolve_game_path(Path::new(&game_path), &expected_extensions)
-        .map_err(|message| LaunchFailure::game_file_missing(&game_id, Some(&game_path), message))?;
+    let expected_extensions = game_files::normalize_expected_extensions(&expected_extensions)
+        .map_err(LaunchFailure::spawn_failed)?;
+    let resolved_game_path = game_files::resolve_game_path(
+        Path::new(&game_path),
+        &expected_extensions,
+        preferred_file.as_deref(),
+    )
+    .map_err(|error| match error.kind {
+        GamePathErrorKind::Missing => {
+            LaunchFailure::game_file_missing(&game_id, Some(&game_path), error.message)
+        }
+        GamePathErrorKind::Corrupt => {
+            LaunchFailure::game_file_corrupt(&game_id, Some(&game_path), error.message)
+        }
+    })?;
     let resolved_game_path_string = resolved_game_path.to_string_lossy().to_string();
     let args = parse_launch_args(
         &emulator_path,
@@ -296,6 +375,36 @@ pub fn launch_game(
     })
 }
 
+#[allow(clippy::result_large_err)]
+fn resolve_downloaded_game_path(
+    store: &crate::storage::RepositoryStore,
+    game_id: &str,
+) -> Result<String, LaunchFailure> {
+    if let Some(local_path) = store
+        .get_download(game_id)
+        .map_err(LaunchFailure::spawn_failed)?
+        .filter(|record| matches!(record.status.as_str(), "ready" | "completed"))
+        .and_then(|record| record.local_path)
+    {
+        return Ok(local_path);
+    }
+
+    if let Some(save_dir) = store
+        .get_torrent_download(game_id)
+        .map_err(LaunchFailure::spawn_failed)?
+        .filter(|record| record.status == "completed")
+        .map(|record| record.save_dir)
+    {
+        return Ok(save_dir);
+    }
+
+    Err(LaunchFailure::game_file_missing(
+        game_id,
+        None,
+        "Game is not downloaded yet.",
+    ))
+}
+
 fn validate_emulator_path(emulator_path: &Path) -> Result<(), String> {
     if !emulator_path.exists() {
         return Err(format!(
@@ -311,34 +420,6 @@ fn validate_emulator_path(emulator_path: &Path) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-fn resolve_game_path(game_path: &Path, expected_extensions: &[String]) -> Result<PathBuf, String> {
-    if !game_path.exists() {
-        return Err(format!("Game path not found: {}", game_path.display()));
-    }
-
-    if game_path.is_file() {
-        validate_game_file(game_path, expected_extensions)?;
-        return make_absolute(game_path);
-    }
-
-    if !game_path.is_dir() {
-        return Err(format!(
-            "Game path is not a file or directory: {}",
-            game_path.display()
-        ));
-    }
-
-    scan_game_directory(game_path, expected_extensions)?
-        .map(|candidate| candidate.path)
-        .ok_or_else(|| {
-            format!(
-                "No game file found in {} matching extensions: {}",
-                game_path.display(),
-                expected_extensions.join(", ")
-            )
-        })
 }
 
 fn parse_launch_args(
@@ -359,150 +440,6 @@ fn parse_launch_args(
         .iter()
         .map(|arg| expand_placeholders(arg, emulator_path, game_path))
         .collect()
-}
-
-fn normalize_expected_extensions(expected_extensions: &[String]) -> Result<Vec<String>, String> {
-    if expected_extensions.is_empty() {
-        return Err("Expected extensions cannot be empty.".to_string());
-    }
-
-    let mut normalized = Vec::new();
-    for extension in expected_extensions {
-        let extension = extension.trim().to_lowercase();
-        if extension.len() <= 1
-            || !extension.starts_with('.')
-            || !extension
-                .chars()
-                .skip(1)
-                .all(|char| char.is_ascii_alphanumeric())
-        {
-            return Err(format!(
-                "Invalid expected extension: {extension}. Extensions must look like .nsp"
-            ));
-        }
-        if !normalized.contains(&extension) {
-            normalized.push(extension);
-        }
-    }
-
-    Ok(normalized)
-}
-
-fn validate_game_file(game_path: &Path, expected_extensions: &[String]) -> Result<(), String> {
-    let metadata = game_path
-        .metadata()
-        .map_err(|error| format!("Failed to inspect game path: {error}"))?;
-    if metadata.len() == 0 {
-        return Err(format!("Game file is empty: {}", game_path.display()));
-    }
-
-    if !file_matches_extensions(game_path, expected_extensions) {
-        return Err(format!(
-            "Game file extension is not allowed: {}. Expected: {}",
-            game_path.display(),
-            expected_extensions.join(", ")
-        ));
-    }
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct GameFileCandidate {
-    path: PathBuf,
-    size: u64,
-}
-
-fn scan_game_directory(
-    game_dir: &Path,
-    expected_extensions: &[String],
-) -> Result<Option<GameFileCandidate>, String> {
-    let mut best: Option<GameFileCandidate> = None;
-
-    scan_game_directory_inner(game_dir, expected_extensions, &mut best)?;
-
-    Ok(best)
-}
-
-fn scan_game_directory_inner(
-    directory: &Path,
-    expected_extensions: &[String],
-    best: &mut Option<GameFileCandidate>,
-) -> Result<(), String> {
-    let entries = std::fs::read_dir(directory).map_err(|error| {
-        format!(
-            "Failed to read game directory {}: {error}",
-            directory.display()
-        )
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "Failed to read game directory entry in {}: {error}",
-                directory.display()
-            )
-        })?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("Failed to inspect game file {}: {error}", path.display()))?;
-
-        if file_type.is_dir() {
-            scan_game_directory_inner(&path, expected_extensions, best)?;
-            continue;
-        }
-
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let metadata = entry
-            .metadata()
-            .map_err(|error| format!("Failed to inspect game file {}: {error}", path.display()))?;
-        if metadata.len() == 0 {
-            continue;
-        }
-
-        if file_matches_extensions(&path, expected_extensions) {
-            let path = make_absolute(&path)?;
-            let candidate = GameFileCandidate {
-                path,
-                size: metadata.len(),
-            };
-
-            if best
-                .as_ref()
-                .map(|current| candidate.size > current.size)
-                .unwrap_or(true)
-            {
-                *best = Some(candidate);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn file_matches_extensions(path: &Path, expected_extensions: &[String]) -> bool {
-    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-        return false;
-    };
-    let extension = format!(".{}", extension.to_lowercase());
-
-    expected_extensions
-        .iter()
-        .any(|expected_extension| expected_extension == &extension)
-}
-
-fn make_absolute(path: &Path) -> Result<PathBuf, String> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-
-    std::env::current_dir()
-        .map(|current_dir| current_dir.join(path))
-        .map_err(|error| format!("Failed to resolve absolute game path: {error}"))
 }
 
 fn expand_placeholders(arg: &str, emulator_path: &str, game_path: &str) -> Result<String, String> {
@@ -556,9 +493,8 @@ fn launch_error(emulator_path: &str, error: std::io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_expected_extensions, parse_launch_args, resolve_game_path, validate_emulator_path,
-    };
+    use super::{parse_launch_args, resolve_downloaded_game_path, validate_emulator_path};
+    use crate::storage::RepositoryStore;
 
     #[test]
     fn parses_basic_game_path_template() {
@@ -622,101 +558,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_game_path_returns_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let game_path = temp.path().join("missing-game.bin");
-
-        let expected_extensions = normalize_expected_extensions(&[".bin".to_string()]).unwrap();
-        let error = resolve_game_path(&game_path, &expected_extensions).unwrap_err();
-
-        assert_eq!(
-            error,
-            format!("Game path not found: {}", game_path.display())
-        );
-    }
-
-    #[test]
-    fn game_directory_picks_largest_matching_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let game_path = temp.path().join("game-directory");
-        std::fs::create_dir(&game_path).unwrap();
-        std::fs::write(game_path.join("tiny.nsp"), b"tiny").unwrap();
-        std::fs::write(game_path.join("larger.xci"), b"larger file").unwrap();
-        std::fs::write(game_path.join("ignored.txt"), b"not a game").unwrap();
-
-        let expected_extensions =
-            normalize_expected_extensions(&[".nsp".to_string(), ".xci".to_string()]).unwrap();
-        let resolved = resolve_game_path(&game_path, &expected_extensions).unwrap();
-
-        assert_eq!(resolved, game_path.join("larger.xci"));
-    }
-
-    #[test]
-    fn game_directory_scan_is_case_insensitive() {
-        let temp = tempfile::tempdir().unwrap();
-        let game_path = temp.path().join("game-directory");
-        std::fs::create_dir(&game_path).unwrap();
-        std::fs::write(game_path.join("GAME.NSP"), b"game").unwrap();
-
-        let expected_extensions = normalize_expected_extensions(&[".nsp".to_string()]).unwrap();
-        let resolved = resolve_game_path(&game_path, &expected_extensions).unwrap();
-
-        assert_eq!(resolved, game_path.join("GAME.NSP"));
-    }
-
-    #[test]
-    fn empty_game_file_returns_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let game_path = temp.path().join("empty-game.nsp");
-        std::fs::write(&game_path, b"").unwrap();
-
-        let expected_extensions = normalize_expected_extensions(&[".nsp".to_string()]).unwrap();
-        let error = resolve_game_path(&game_path, &expected_extensions).unwrap_err();
-
-        assert_eq!(
-            error,
-            format!("Game file is empty: {}", game_path.display())
-        );
-    }
-
-    #[test]
-    fn no_matching_game_file_returns_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let game_path = temp.path().join("game-directory");
-        std::fs::create_dir(&game_path).unwrap();
-        std::fs::write(game_path.join("readme.txt"), b"not a game").unwrap();
-
-        let expected_extensions = normalize_expected_extensions(&[".nsp".to_string()]).unwrap();
-        let error = resolve_game_path(&game_path, &expected_extensions).unwrap_err();
-
-        assert_eq!(
-            error,
-            format!(
-                "No game file found in {} matching extensions: .nsp",
-                game_path.display()
-            )
-        );
-    }
-
-    #[test]
-    fn disallowed_game_file_extension_returns_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let game_path = temp.path().join("game.txt");
-        std::fs::write(&game_path, b"game").unwrap();
-
-        let expected_extensions = normalize_expected_extensions(&[".nsp".to_string()]).unwrap();
-        let error = resolve_game_path(&game_path, &expected_extensions).unwrap_err();
-
-        assert_eq!(
-            error,
-            format!(
-                "Game file extension is not allowed: {}. Expected: .nsp",
-                game_path.display()
-            )
-        );
-    }
-
-    #[test]
     fn launch_args_receive_resolved_game_file_path() {
         let args = parse_launch_args(
             "C:/Emulators/retro.exe",
@@ -726,5 +567,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["-f", "-g", "C:/Games/Sonic/Sonic.nsp"]);
+    }
+
+    #[test]
+    fn completed_torrent_record_resolves_as_launch_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RepositoryStore::open(&temp.path().join("retrohydra.db")).unwrap();
+        let game_dir = temp.path().join("downloaded-game");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        let game_dir_string = game_dir.to_string_lossy().to_string();
+        store
+            .upsert_torrent_download_start(
+                "repo::game",
+                "magnet:?xt=urn:btih:abc",
+                &game_dir_string,
+            )
+            .unwrap();
+        store
+            .update_torrent_progress("repo::game", "completed", 100.0, 100, 100, 0, 0, 0)
+            .unwrap();
+
+        let resolved = resolve_downloaded_game_path(&store, "repo::game").unwrap();
+
+        assert_eq!(resolved, game_dir_string);
     }
 }

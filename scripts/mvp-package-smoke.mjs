@@ -1,0 +1,89 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { readdir, rm, stat } from 'node:fs/promises';
+import path from 'node:path';
+
+const root = process.cwd();
+const smokeDir = path.join(root, '.tmp', 'package-smoke');
+const releaseDir = resolveReleaseDir();
+const binaryPath = process.platform === 'win32'
+  ? path.join(releaseDir, 'retrohydra.exe')
+  : path.join(releaseDir, 'retrohydra');
+const nsisDir = path.join(releaseDir, 'bundle', 'nsis');
+
+async function main() {
+  await assertFile(binaryPath, 'release binary');
+  const installers = await listNsisInstallers();
+  assert.ok(installers.length > 0, 'Tauri NSIS installer artifact is missing. Run npm run tauri:build first.');
+
+  await rm(smokeDir, { recursive: true, force: true });
+  const output = await runSmokeBinary();
+
+  console.log(`PASS release binary: ${path.relative(root, binaryPath)}`);
+  console.log(`PASS NSIS artifact: ${path.relative(root, installers[0])}`);
+  console.log(`PASS package smoke data: ${path.relative(root, smokeDir)}`);
+  if (output.trim()) console.log(output.trim());
+}
+
+async function assertFile(filePath, label) {
+  try {
+    const info = await stat(filePath);
+    assert.ok(info.isFile(), `${label} is not a file: ${filePath}`);
+  } catch (error) {
+    throw new Error(
+      `${label} is missing: ${filePath}. Run npm run tauri:build first, or set RETROHYDRA_RELEASE_DIR to the Tauri release directory.\n${error.message}`
+    );
+  }
+}
+
+function resolveReleaseDir() {
+  const configured = process.env.RETROHYDRA_RELEASE_DIR?.trim();
+  if (configured) {
+    return path.resolve(root, configured);
+  }
+
+  return path.join(root, 'src-tauri', 'target', 'release');
+}
+
+async function listNsisInstallers() {
+  try {
+    const entries = await readdir(nsisDir);
+    return entries
+      .filter((entry) => entry.toLowerCase().endsWith('.exe'))
+      .map((entry) => path.join(nsisDir, entry));
+  } catch {
+    return [];
+  }
+}
+
+function runSmokeBinary() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binaryPath, [], {
+      cwd: root,
+      env: {
+        ...process.env,
+        RETROHYDRA_PACKAGE_SMOKE: '1',
+        RETROHYDRA_PACKAGE_SMOKE_DATA_DIR: smokeDir
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+      reject(new Error(`Package smoke exited with ${code}.\n${stdout}\n${stderr}`));
+    });
+  });
+}
+
+await main();

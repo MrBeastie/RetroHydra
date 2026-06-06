@@ -1,0 +1,92 @@
+[
+  {
+    "id": "nes-mesen",
+    "platform": "nes",
+    "display_name": "Mesen 2",
+    "version_strategy": {
+      "kind": "GithubLatest",
+      "repo": "SourMesen/Mesen2",
+      "asset_pattern": "Mesen*Windows*.zip"
+    },
+    "exe_relative_path": "Mesen.exe",
+    "launch_args": ["{game}"],
+    "requires_system_files": false,
+    "license": "GPL-3.0",
+    "portable": true
+  },
+  {
+    "id": "snes-mesen",
+    "platform": "snes",
+    "display_name": "Mesen 2",
+    "version_strategy": {
+      "kind": "GithubLatest",
+      "repo": "SourMesen/Mesen2",
+      "asset_pattern": "Mesen*Windows*.zip"
+    },
+    "exe_relative_path": "Mesen.exe",
+    "launch_args": ["{game}"],
+    "requires_system_files": false,
+    "license": "GPL-3.0",
+    "portable": true
+  },
+  {
+    "id": "n64-rmg",
+    "platform": "n64",
+    "display_name": "RMG",
+    "version_strategy": {
+      "kind": "GithubLatest",
+      "repo": "Rosalie241/RMG",
+      "asset_pattern": "RMG-Portable-Windows*.zip"
+    },
+    "exe_relative_path": "RMG.exe",
+    "launch_args": ["{game}"],
+    "requires_system_files": false,
+    "license": "GPL-3.0",
+    "portable": true
+  },
+  {
+    "id": "gba-mgba",
+    "platform": "gba",
+    "display_name": "mGBA",
+    "version_strategy": {
+      "kind": "GithubLatest",
+      "repo": "mgba-emu/mgba",
+      "asset_pattern": "mGBA-*-win64.7z"
+    },
+    "exe_relative_path": "mGBA.exe",
+    "launch_args": ["-f", "{game}"],
+    "requires_system_files": false,
+    "license": "MPL-2.0",
+    "portable": true
+  },
+  {
+    "id": "ps2-pcsx2",
+    "platform": "ps2",
+    "display_name": "PCSX2",
+    "version_strategy": {
+      "kind": "GithubLatest",
+      "repo": "PCSX2/pcsx2",
+      "asset_pattern": "pcsx2-*-windows-x64-Qt.7z"
+    },
+    "exe_relative_path": "pcsx2-qt.exe",
+    "launch_args": ["-fullscreen", "--", "{game}"],
+    "requires_system_files": true,
+    "license": "GPL-3.0",
+    "portable": true
+  },
+  {
+    "id": "psp-ppsspp",
+    "platform": "psp",
+    "display_name": "PPSSPP",
+    "version_strategy": {
+      "kind": "GithubLatest",
+      "repo": "hrydgard/ppsspp",
+      "asset_pattern": "PPSSPP-*-Windows-x64.zip"
+    },
+    "exe_relative_path": "PPSSPPWindows64.exe",
+    "launch_args": ["--fullscreen", "{game}"],
+    "requires_system_files": false,
+    "license": "GPL-2.0",
+    "portable": true
+  }
+]

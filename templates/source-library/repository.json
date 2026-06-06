@@ -1,0 +1,142 @@
+{
+  "metadata": {
+    "id": "retrohydra-source-template",
+    "name": "RetroHydra Source Library Template",
+    "version": "1.0.0",
+    "schemaVersion": 3,
+    "maintainer": "Replace with your name or community",
+    "homepageUrl": "https://example.com/retrohydra-source-library",
+    "license": "Template metadata only. Replace with your source library license.",
+    "trustLevel": "community",
+    "updatedAt": "2026-06-03T00:00:00Z"
+  },
+  "system_files": [
+    {
+      "id": "user_ps1_bios",
+      "platform": "ps1",
+      "assetKind": "bios",
+      "displayName": "User-provided PlayStation BIOS",
+      "sources": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import a BIOS file that you dumped from hardware you own.",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sizeBytes": 524288
+        }
+      ],
+      "installHint": {
+        "target": "app_system",
+        "relativePath": "ps1/bios/scph5501.bin"
+      }
+    }
+  ],
+  "catalog": [
+    {
+      "id": "template_homebrew_http",
+      "platform": "nes",
+      "title": "Template Homebrew HTTP Entry",
+      "description": "Replace this with a game that you have permission to distribute over HTTPS.",
+      "contentMode": "downloadable",
+      "setupProfileId": "nes-mesen",
+      "metadata": {
+        "releaseYear": 2026,
+        "developer": "Example Developer",
+        "genres": ["Homebrew"],
+        "tags": ["template", "http"],
+        "players": "1"
+      },
+      "downloads": [
+        {
+          "kind": "http",
+          "url": "https://example.com/releases/template-homebrew.nes",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sizeBytes": 24576
+        }
+      ],
+      "expectedExtensions": [".nes"],
+      "requiredSystemFileIds": [],
+      "launch": {
+        "argsTemplate": "{game_path}",
+        "preferredFile": "template-homebrew.nes"
+      }
+    },
+    {
+      "id": "template_homebrew_magnet",
+      "platform": "gba",
+      "title": "Template Homebrew Magnet Entry",
+      "description": "Replace this with a torrent that distributes content you are allowed to share.",
+      "contentMode": "downloadable",
+      "metadata": {
+        "releaseYear": 2026,
+        "developer": "Example Developer",
+        "genres": ["Homebrew"],
+        "tags": ["template", "magnet"],
+        "players": "1"
+      },
+      "downloads": [
+        {
+          "kind": "magnet",
+          "uri": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=template-homebrew.gba",
+          "infoHash": "0123456789abcdef0123456789abcdef01234567",
+          "sizeBytes": 131072
+        }
+      ],
+      "expectedExtensions": [".gba"],
+      "requiredSystemFileIds": [],
+      "launch": {
+        "argsTemplate": "{game_path}",
+        "preferredFile": "template-homebrew.gba"
+      }
+    },
+    {
+      "id": "template_user_owned_disc",
+      "platform": "ps1",
+      "title": "Template User-Owned Disc Entry",
+      "description": "Use this shape for commercial discs or ROMs that users must provide themselves.",
+      "contentMode": "user_provided",
+      "setupProfileId": "ps1-manual",
+      "metadata": {
+        "releaseYear": 1998,
+        "developer": "Original Developer",
+        "publisher": "Original Publisher",
+        "genres": ["Example"],
+        "tags": ["user-provided"],
+        "players": "1"
+      },
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own legally created disc image. Do not publish download links for this entry."
+        }
+      ],
+      "expectedExtensions": [".cue", ".bin", ".iso", ".chd"],
+      "requiredSystemFileIds": ["user_ps1_bios"],
+      "launch": {
+        "argsTemplate": "-batch \"{game_path}\""
+      }
+    },
+    {
+      "id": "template_metadata_only",
+      "platform": "snes",
+      "title": "Template Metadata-Only Entry",
+      "description": "Use this shape for catalog metadata, compatibility notes, and setup hints without payload distribution.",
+      "contentMode": "metadata_only",
+      "metadata": {
+        "releaseYear": 1994,
+        "developer": "Original Developer",
+        "publisher": "Original Publisher",
+        "genres": ["Example"],
+        "tags": ["metadata-only"],
+        "players": "1"
+      },
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "No automatic source is published by this metadata-only entry."
+        }
+      ],
+      "expectedExtensions": [".sfc", ".smc"],
+      "requiredSystemFileIds": []
+    }
+  ]
+}

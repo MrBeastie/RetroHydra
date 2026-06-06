@@ -3,6 +3,7 @@ use std::path::{Component, Path};
 use url::Url;
 
 use crate::schema::{RepositorySchema, SourceUri};
+use crate::setup_profiles;
 
 const GLOBAL_ID_SEPARATOR: &str = "::";
 const SUPPORTED_PLATFORMS: &[&str] = &[
@@ -61,8 +62,8 @@ fn validate_repository_schema_internal(
     allow_dev_http: bool,
     allow_bundled_sources: bool,
 ) -> Result<(), String> {
-    if repo.metadata.schema_version != 2 {
-        return Err("Unsupported repository schemaVersion. Expected 2.".to_string());
+    if !matches!(repo.metadata.schema_version, 2 | 3) {
+        return Err("Unsupported repository schemaVersion. Expected 2 or 3.".to_string());
     }
     validate_id("repository id", &repo.metadata.id)?;
     validate_non_empty("repository name", &repo.metadata.name)?;
@@ -112,11 +113,43 @@ fn validate_repository_schema_internal(
         validate_id("game id", &game.id)?;
         validate_platform(&game.platform)?;
         validate_non_empty("game title", &game.title)?;
-        validate_expected_extensions(&game.expected_extensions)?;
+        let setup_profile = match game.setup_profile_id.as_deref() {
+            Some(setup_profile_id) => {
+                validate_id("game setupProfileId", setup_profile_id)?;
+                setup_profiles::get_platform_setup_profile(setup_profile_id)
+            }
+            None => None,
+        };
+        if let Some(profile) = setup_profile.as_ref() {
+            if profile.platform != game.platform {
+                return Err(format!(
+                    "Game {} setupProfileId {} is for platform {}, not {}.",
+                    game.id, profile.id, profile.platform, game.platform
+                ));
+            }
+        }
+        let profile_extensions = setup_profile
+            .as_ref()
+            .map(|profile| profile.game_files.expected_extensions.as_slice());
+        validate_expected_extensions_with_profile(&game.expected_extensions, profile_extensions)?;
         if !game_ids.insert(game.id.as_str()) {
             return Err(format!("Duplicate game id: {}", game.id));
         }
         validate_sources(&game.downloads, allow_dev_http, allow_bundled_sources)?;
+        if let Some(launch) = &game.launch {
+            if let Some(args_template) = &launch.args_template {
+                validate_non_empty("game launch.argsTemplate", args_template)?;
+                if args_template.chars().any(|ch| ch.is_control()) {
+                    return Err(format!(
+                        "Game {} launch.argsTemplate cannot contain control characters.",
+                        game.id
+                    ));
+                }
+            }
+            if let Some(preferred_file) = &launch.preferred_file {
+                validate_relative_path(preferred_file)?;
+            }
+        }
         if let Some(url) = &game.cover_image_url {
             validate_http_url(
                 &Url::parse(url).map_err(|error| format!("Invalid coverImageUrl: {error}"))?,
@@ -129,6 +162,30 @@ fn validate_repository_schema_internal(
                 allow_dev_http,
             )?;
         }
+        if let Some(artwork) = &game.artwork {
+            for (label, url) in [
+                ("artwork.cover", artwork.cover.as_ref()),
+                ("artwork.hero", artwork.hero.as_ref()),
+                ("artwork.logo", artwork.logo.as_ref()),
+            ] {
+                if let Some(url) = url {
+                    validate_http_url(
+                        &Url::parse(url).map_err(|error| format!("Invalid {label}: {error}"))?,
+                        allow_dev_http,
+                    )?;
+                }
+            }
+            for screenshot in &artwork.screenshots {
+                validate_http_url(
+                    &Url::parse(screenshot)
+                        .map_err(|error| format!("Invalid artwork.screenshots URL: {error}"))?,
+                    allow_dev_http,
+                )?;
+            }
+        }
+        if let Some(content_mode) = &game.content_mode {
+            validate_content_mode(content_mode)?;
+        }
         for required_id in &game.required_system_file_ids {
             if !asset_ids.contains(required_id.as_str()) {
                 return Err(format!(
@@ -140,6 +197,15 @@ fn validate_repository_schema_internal(
     }
 
     Ok(())
+}
+
+fn validate_content_mode(value: &str) -> Result<(), String> {
+    match value {
+        "downloadable" | "user_provided" | "metadata_only" => Ok(()),
+        _ => Err(format!(
+            "Invalid game contentMode: {value}. Expected downloadable, user_provided, or metadata_only."
+        )),
+    }
 }
 
 pub fn validate_platform(platform: &str) -> Result<(), String> {
@@ -160,6 +226,21 @@ fn validate_expected_extensions(extensions: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn validate_expected_extensions_with_profile(
+    extensions: &[String],
+    profile_extensions: Option<&[String]>,
+) -> Result<(), String> {
+    if extensions.is_empty() {
+        if let Some(profile_extensions) = profile_extensions {
+            return validate_expected_extensions(profile_extensions);
+        }
+        return Err(
+            "Each game must include expectedExtensions or a known setupProfileId.".to_string(),
+        );
+    }
+    validate_expected_extensions(extensions)
 }
 
 fn validate_expected_extension(extension: &str) -> Result<(), String> {
@@ -349,6 +430,10 @@ mod tests {
                 description: None,
                 cover_image_url: None,
                 trailer_url: None,
+                artwork: None,
+                metadata: None,
+                content_mode: None,
+                setup_profile_id: None,
                 downloads: vec![SourceUri::Bundled {
                     path: "demo-content/game.nes".to_string(),
                     sha256: "a".repeat(64),
@@ -356,6 +441,7 @@ mod tests {
                 }],
                 expected_extensions: vec![".nes".to_string()],
                 required_system_file_ids: vec![],
+                launch: None,
             }],
         };
 

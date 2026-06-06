@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { validateRepositorySchema } from './repository.ts';
+import type { ImportAssetFileReport, ImportGameFileReport, RequirementItem } from './repository.ts';
 
 const hash = 'a'.repeat(64);
 
@@ -70,6 +72,118 @@ describe('repository schema', () => {
     });
 
     assert.equal(repo.system_files[0].sources[0].kind, 'user_provided');
+  });
+
+  it('accepts v3 rich metadata and reserved setup profiles', () => {
+    const repo = validateRepositorySchema({
+      metadata: { id: 'showcase', name: 'Showcase', version: '1', schemaVersion: 3 },
+      system_files: [],
+      catalog: [
+        {
+          id: 'star-orbit',
+          platform: 'switch',
+          title: 'Star Orbit Prototype',
+          description: 'A fictional showcase entry.',
+          artwork: {
+            cover: 'https://example.com/star-orbit-cover.jpg',
+            hero: 'https://example.com/star-orbit-hero.jpg',
+            logo: 'https://example.com/star-orbit-logo.png',
+            screenshots: ['https://example.com/star-orbit-screen.jpg']
+          },
+          metadata: {
+            releaseYear: 2026,
+            developer: 'RetroHydra Labs',
+            publisher: 'Community Preview',
+            genres: ['Adventure'],
+            tags: ['user-provided'],
+            players: '1',
+            series: 'Star Orbit',
+            externalIds: { showcase: 'star-orbit' }
+          },
+          contentMode: 'user_provided',
+          setupProfileId: 'switch-manual',
+          downloads: [{ kind: 'user_provided', instructions: 'Import your local .xci/.nsp package.' }],
+          expectedExtensions: ['.xci', '.nsp']
+        }
+      ]
+    });
+
+    assert.equal(repo.metadata.schemaVersion, 3);
+    assert.equal(repo.catalog[0].contentMode, 'user_provided');
+    assert.equal(repo.catalog[0].setupProfileId, 'switch-manual');
+    assert.equal(repo.catalog[0].artwork?.hero, 'https://example.com/star-orbit-hero.jpg');
+  });
+
+  it('inherits expected extensions from a known setup profile', () => {
+    const repo = validateRepositorySchema({
+      metadata: { id: 'showcase', name: 'Showcase', version: '1', schemaVersion: 3 },
+      system_files: [],
+      catalog: [
+        {
+          id: 'star-orbit',
+          platform: 'switch',
+          title: 'Star Orbit Prototype',
+          contentMode: 'user_provided',
+          setupProfileId: 'switch-manual',
+          downloads: [{ kind: 'user_provided', instructions: 'Import your local package.' }]
+        }
+      ]
+    });
+
+    assert.deepEqual(repo.catalog[0].expectedExtensions, ['.nsp', '.xci', '.nca']);
+  });
+
+  it('normalizes platformProfileId to the runtime setup profile', () => {
+    const repo = validateRepositorySchema({
+      metadata: { id: 'zero-friction', name: 'Zero Friction', version: '1', schemaVersion: 3 },
+      system_files: [],
+      catalog: [
+        {
+          id: 'gba-game',
+          platform: 'gba',
+          title: 'GBA Game',
+          platformProfileId: 'gba-mgba',
+          downloads: [{ kind: 'magnet', uri: 'magnet:?xt=urn:btih:abcdef' }]
+        }
+      ]
+    });
+
+    assert.equal(repo.catalog[0].setupProfileId, 'gba-mgba');
+    assert.deepEqual(repo.catalog[0].expectedExtensions, ['.gba']);
+  });
+
+  it('keeps unknown setup profiles visible when expected extensions are explicit', () => {
+    const repo = validateRepositorySchema({
+      metadata: { id: 'showcase', name: 'Showcase', version: '1', schemaVersion: 3 },
+      system_files: [],
+      catalog: [
+        {
+          id: 'unknown-profile-game',
+          platform: 'switch',
+          title: 'Unknown Profile Game',
+          setupProfileId: 'community-profile',
+          downloads: [{ kind: 'user_provided', instructions: 'Import your local package.' }],
+          expectedExtensions: ['.xci']
+        }
+      ]
+    });
+
+    assert.equal(repo.catalog[0].setupProfileId, 'community-profile');
+    assert.deepEqual(repo.catalog[0].expectedExtensions, ['.xci']);
+  });
+
+  it('accepts the source library template repository', () => {
+    const template = JSON.parse(readFileSync(
+      new URL('../../templates/source-library/repository.json', import.meta.url),
+      'utf8'
+    ));
+
+    const repo = validateRepositorySchema(template);
+
+    assert.equal(repo.metadata.id, 'retrohydra-source-template');
+    assert.equal(repo.catalog.length, 4);
+    assert.equal(repo.catalog[2].contentMode, 'user_provided');
+    assert.equal(repo.catalog[3].contentMode, 'metadata_only');
   });
 
   it('accepts bundled sources for local built-in repository validation', () => {
@@ -180,5 +294,26 @@ describe('repository schema', () => {
     });
 
     assert.deepEqual(repo.catalog[0].expectedExtensions, ['.nsp']);
+  });
+
+  it('models import reports and requirement checksums', () => {
+    const report: ImportAssetFileReport = {
+      status: 'already_installed',
+      installedPath: 'C:\\RetroHydra\\System\\nes\\bios.bin'
+    };
+    const requirement = {
+      checksum: hash,
+      sha256: hash
+    } as RequirementItem;
+    const gameReport: ImportGameFileReport = {
+      status: 'installed',
+      gameId: 'repo::game',
+      installedPath: 'C:\\RetroHydra\\Games\\game.xci',
+      sha256: hash
+    };
+
+    assert.equal(report.status, 'already_installed');
+    assert.equal(gameReport.status, 'installed');
+    assert.equal(requirement.checksum, hash);
   });
 });

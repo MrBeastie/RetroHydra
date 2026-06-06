@@ -1,6 +1,6 @@
 'use client';
 
-import { Compass, Database, Download, FolderHeart, Home, Library, Settings, type LucideIcon } from 'lucide-react';
+import { Compass, Database, Download, FolderHeart, Home, Library, type LucideIcon } from 'lucide-react';
 import type { LauncherView } from '../../stores/launcherStore.ts';
 
 const NAV_ITEMS: Array<{ id: LauncherView; label: string; icon: LucideIcon }> = [
@@ -8,8 +8,7 @@ const NAV_ITEMS: Array<{ id: LauncherView; label: string; icon: LucideIcon }> = 
   { id: 'library', label: 'Library', icon: Library },
   { id: 'explore', label: 'Explore', icon: Compass },
   { id: 'downloads', label: 'Downloads', icon: Download },
-  { id: 'collections', label: 'Collections', icon: FolderHeart },
-  { id: 'settings', label: 'Settings', icon: Settings }
+  { id: 'collections', label: 'Collections', icon: FolderHeart }
 ];
 
 interface SidebarProps {
@@ -42,6 +41,7 @@ export function Sidebar({
           return (
             <button
               key={item.id}
+              data-testid={`nav-${item.id}`}
               data-focus-id={focusId}
               data-focus-zone="sidebar"
               onFocus={() => onFocus(focusId)}

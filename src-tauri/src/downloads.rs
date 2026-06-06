@@ -17,12 +17,16 @@ pub async fn download_source_to_file(
     destination: &Path,
 ) -> Result<DownloadedFile, String> {
     match source {
-        SourceUri::Http { url, sha256, .. } => {
-            download_http_to_file(url, sha256, destination).await
-        }
-        SourceUri::Bundled { path, sha256, .. } => {
-            copy_bundled_to_file(path, sha256, destination).await
-        }
+        SourceUri::Http {
+            url,
+            sha256,
+            size_bytes,
+        } => download_http_to_file(url, sha256, *size_bytes, destination).await,
+        SourceUri::Bundled {
+            path,
+            sha256,
+            size_bytes,
+        } => copy_bundled_to_file(path, sha256, *size_bytes, destination).await,
         SourceUri::Magnet { uri, .. } => handle_torrent(uri).await,
         SourceUri::UserProvided { .. } => {
             Err("This source is user-provided and cannot be downloaded automatically.".to_string())
@@ -83,6 +87,7 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
 async fn download_http_to_file(
     url: &str,
     expected_sha256: &str,
+    expected_size_bytes: Option<u64>,
     destination: &Path,
 ) -> Result<DownloadedFile, String> {
     let response = reqwest::get(url)
@@ -101,6 +106,7 @@ async fn download_http_to_file(
             "SHA256 mismatch: expected {expected_sha256}, got {actual_sha256}"
         ));
     }
+    validate_size(bytes.len() as u64, expected_size_bytes)?;
 
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent)
@@ -120,6 +126,7 @@ async fn download_http_to_file(
 async fn copy_bundled_to_file(
     path: &str,
     expected_sha256: &str,
+    expected_size_bytes: Option<u64>,
     destination: &Path,
 ) -> Result<DownloadedFile, String> {
     let bytes =
@@ -130,6 +137,7 @@ async fn copy_bundled_to_file(
             "SHA256 mismatch: expected {expected_sha256}, got {actual_sha256}"
         ));
     }
+    validate_size(bytes.len() as u64, expected_size_bytes)?;
 
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent)
@@ -146,6 +154,18 @@ async fn copy_bundled_to_file(
     })
 }
 
+fn validate_size(actual_size_bytes: u64, expected_size_bytes: Option<u64>) -> Result<(), String> {
+    if let Some(expected_size_bytes) = expected_size_bytes {
+        if actual_size_bytes != expected_size_bytes {
+            return Err(format!(
+                "Size mismatch: expected {expected_size_bytes} bytes, got {actual_size_bytes} bytes"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_torrent(_magnet: &str) -> Result<DownloadedFile, String> {
     Err("Torrent handler is not implemented in v1.".to_string())
 }
@@ -154,16 +174,12 @@ fn file_name_from_url(input: &str) -> Option<String> {
     let parsed = Url::parse(input).ok()?;
     let segment = parsed
         .path_segments()?
-        .filter(|segment| !segment.is_empty())
-        .last()?;
+        .rfind(|segment| !segment.is_empty())?;
     Some(safe_segment(segment))
 }
 
 fn file_name_from_path(input: &str) -> Option<String> {
-    let segment = input
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .last()?;
+    let segment = input.split('/').rfind(|segment| !segment.is_empty())?;
     Some(safe_segment(segment))
 }
 

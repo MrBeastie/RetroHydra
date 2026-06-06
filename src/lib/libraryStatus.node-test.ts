@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildGameLibraryItem } from './libraryStatus.ts';
+import { buildGameLibraryItems, buildGameLibraryItem, searchAndSortLibraryItems } from './libraryStatus.ts';
 
 const game = {
   id: 'repo::game',
@@ -12,6 +12,14 @@ const game = {
   downloads: [{ kind: 'magnet', uri: 'magnet:?xt=urn:btih:abc' }],
   expectedExtensions: ['.nes'],
   requiredSystemFileIds: []
+};
+
+const secondGame = {
+  ...game,
+  id: 'repo::second',
+  sourceId: 'second',
+  title: 'Alpha Quest',
+  platform: 'gba'
 };
 
 const configuredSettings = {
@@ -131,6 +139,24 @@ describe('library status derivation', () => {
     assert.deepEqual(item.missingRequirements, ['Demo BIOS is not installed']);
   });
 
+  it('makes corrupt downloaded game files re-downloadable instead of playable', () => {
+    const item = buildGameLibraryItem(
+      game,
+      status({
+        installed: true,
+        systemRequirementsReady: false,
+        missingRequirements: ['Game file: NES game file does not contain a valid iNES header'],
+        download: download({ status: 'completed', progressPercent: 100, completedAt: '2026-05-23T00:05:00Z' })
+      }),
+      configuredSettings
+    );
+
+    assert.equal(item.readyToPlay, false);
+    assert.equal(item.primaryAction, 'download');
+    assert.equal(item.primaryActionLabel, 'Re-download');
+    assert.equal(item.statusLabel, 'Game File Issue');
+  });
+
   it('marks active downloads as downloading', () => {
     const item = buildGameLibraryItem(
       game,
@@ -159,5 +185,72 @@ describe('library status derivation', () => {
     assert.equal(item.hasError, true);
     assert.equal(item.primaryAction, 'retry');
     assert.equal(item.statusLabel, 'Download Error');
+  });
+
+  it('searches library by title, platform, repository, source id, and status text', () => {
+    const items = buildGameLibraryItems(
+      [game, secondGame],
+      [
+        status({ installed: true }),
+        {
+          ...status({
+            gameId: 'repo::second',
+            download: download({ gameId: 'repo::second', status: 'paused' })
+          })
+        }
+      ],
+      configuredSettings
+    );
+
+    assert.deepEqual(
+      searchAndSortLibraryItems(items, 'all', 'alpha', 'title').map((item) => item.game.id),
+      ['repo::second']
+    );
+    assert.deepEqual(
+      searchAndSortLibraryItems(items, 'all', 'gba', 'title').map((item) => item.game.id),
+      ['repo::second']
+    );
+    assert.deepEqual(
+      searchAndSortLibraryItems(items, 'all', 'paused', 'title').map((item) => item.game.id),
+      ['repo::second']
+    );
+    assert.deepEqual(
+      searchAndSortLibraryItems(items, 'all', 'demo repo', 'title').map((item) => item.game.id),
+      ['repo::second', 'repo::game']
+    );
+  });
+
+  it('applies library filters before search and sorts status by actionability', () => {
+    const items = buildGameLibraryItems(
+      [game, secondGame, { ...game, id: 'repo::third', sourceId: 'third', title: 'Beta Run' }],
+      [
+        status({
+          installed: true,
+          download: download({ status: 'completed', progressPercent: 100, completedAt: '2026-05-23T00:05:00Z' })
+        }),
+        {
+          ...status({
+            gameId: 'repo::second',
+            download: download({ gameId: 'repo::second', status: 'downloading' })
+          })
+        },
+        {
+          ...status({
+            gameId: 'repo::third',
+            download: download({ gameId: 'repo::third', status: 'error', errorMessage: 'No peers' })
+          })
+        }
+      ],
+      configuredSettings
+    );
+
+    assert.deepEqual(
+      searchAndSortLibraryItems(items, 'downloading', '', 'status').map((item) => item.game.id),
+      ['repo::second', 'repo::third']
+    );
+    assert.deepEqual(
+      searchAndSortLibraryItems(items, 'installed', 'alpha', 'title').map((item) => item.game.id),
+      []
+    );
   });
 });

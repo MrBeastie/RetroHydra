@@ -101,10 +101,55 @@ pub struct RepositoryGame {
     pub description: Option<String>,
     pub cover_image_url: Option<String>,
     pub trailer_url: Option<String>,
+    #[serde(default)]
+    pub artwork: Option<GameArtwork>,
+    #[serde(default)]
+    pub metadata: Option<GameMetadata>,
+    #[serde(default)]
+    pub content_mode: Option<String>,
+    /// Reserved for the future Platform Setup Profiles step.
+    #[serde(default, alias = "platformProfileId")]
+    pub setup_profile_id: Option<String>,
     pub downloads: Vec<SourceUri>,
+    #[serde(default)]
     pub expected_extensions: Vec<String>,
     #[serde(default)]
     pub required_system_file_ids: Vec<String>,
+    #[serde(default)]
+    pub launch: Option<GameLaunchConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameLaunchConfig {
+    pub args_template: Option<String>,
+    pub preferred_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameArtwork {
+    pub cover: Option<String>,
+    pub hero: Option<String>,
+    pub logo: Option<String>,
+    #[serde(default)]
+    pub screenshots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameMetadata {
+    pub release_year: Option<u16>,
+    pub developer: Option<String>,
+    pub publisher: Option<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub players: Option<String>,
+    pub series: Option<String>,
+    #[serde(default)]
+    pub external_ids: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,9 +200,15 @@ pub struct CatalogGameView {
     pub description: Option<String>,
     pub cover_image_url: Option<String>,
     pub trailer_url: Option<String>,
+    pub artwork: Option<GameArtwork>,
+    pub metadata: Option<GameMetadata>,
+    pub content_mode: Option<String>,
+    /// Reserved for the future Platform Setup Profiles step.
+    pub setup_profile_id: Option<String>,
     pub downloads: Vec<SourceUri>,
     pub expected_extensions: Vec<String>,
     pub required_system_file_ids: Vec<String>,
+    pub launch: Option<GameLaunchConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +234,7 @@ pub struct RequirementItem {
     pub trusted: bool,
     pub local_path: Option<String>,
     pub target_path: Option<String>,
+    pub checksum: Option<String>,
     pub sha256: Option<String>,
     pub message: Option<String>,
 }
@@ -215,7 +267,27 @@ pub struct DownloadRecord {
     pub local_path: Option<String>,
     pub sha256: Option<String>,
     pub message: Option<String>,
+    pub source: String,
+    pub magnet_uri: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAssetFileReport {
+    pub status: String,
+    pub installed_path: String,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportGameFileReport {
+    pub status: String,
+    pub game_id: String,
+    pub installed_path: String,
+    pub sha256: Option<String>,
+    pub error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +342,30 @@ pub struct EmulatorConfig {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProfileEmulatorConfig {
+    pub profile_id: String,
+    pub platform: String,
+    pub exe_path: Option<String>,
+    pub status: String,
+    pub last_validated_at: Option<String>,
+    pub version: Option<String>,
+    pub launch_args_template: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSystemFileImport {
+    pub profile_id: String,
+    pub requirement_id: String,
+    pub target_path: Option<String>,
+    pub status: String,
+    pub sha256: Option<String>,
+    pub verified_at: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssetInstallation {
     pub asset_id: String,
     pub target_path: Option<String>,
@@ -294,6 +390,7 @@ pub struct OnboardingState {
 pub struct HealthReport {
     pub generated_at: String,
     pub emulators: Vec<HealthCheckItem>,
+    pub platform_setup: Vec<HealthCheckItem>,
     pub system_files: Vec<HealthCheckItem>,
     pub game_files: Vec<HealthCheckItem>,
     pub repositories: Vec<HealthCheckItem>,
@@ -313,6 +410,125 @@ pub struct HealthCheckItem {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PlatformSetupProfile {
+    pub id: String,
+    pub platform: String,
+    pub display_name: String,
+    pub emulator: PlatformSetupEmulator,
+    pub game_files: PlatformSetupGameFiles,
+    pub system_files: Vec<ProfileSystemFileRequirement>,
+    pub launch: PlatformSetupLaunch,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformSetupEmulator {
+    pub install_mode: String,
+    pub emulator_name: String,
+    pub executable_name: Option<String>,
+    pub executable_candidates: Vec<String>,
+    pub download: Option<ProfileEmulatorDownload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileEmulatorDownload {
+    pub url: String,
+    pub sha256: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformSetupGameFiles {
+    pub expected_extensions: Vec<String>,
+    pub allow_directory: bool,
+    pub preferred_file_patterns: Vec<String>,
+    pub validators: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSystemFileRequirement {
+    pub id: String,
+    pub label: String,
+    pub asset_kind: String,
+    pub required: bool,
+    pub extensions: Vec<String>,
+    pub target_name: Option<String>,
+    pub checksum: Option<String>,
+    pub source_mode: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformSetupLaunch {
+    pub args_template: String,
+    pub working_directory: Option<String>,
+    pub preferred_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSetupState {
+    pub game_id: String,
+    pub profile_id: Option<String>,
+    pub profile_display_name: Option<String>,
+    pub unsupported_profile_id: Option<String>,
+    pub emulator: GameSetupEmulatorState,
+    pub system_files: Vec<GameSetupSystemFileState>,
+    pub repository_requirements: Vec<RequirementItem>,
+    pub game_file: GameSetupGameFileState,
+    pub launch: GameSetupLaunchState,
+    pub primary_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSetupEmulatorState {
+    pub status: String,
+    pub profile_id: Option<String>,
+    pub platform: String,
+    pub emulator_name: String,
+    pub install_mode: String,
+    pub executable_path: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSetupSystemFileState {
+    pub id: String,
+    pub label: String,
+    pub asset_kind: String,
+    pub required: bool,
+    pub status: String,
+    pub installed_path: Option<String>,
+    pub expected_extensions: Vec<String>,
+    pub checksum: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSetupGameFileState {
+    pub status: String,
+    pub installed_path: Option<String>,
+    pub expected_extensions: Vec<String>,
+    pub allow_directory: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSetupLaunchState {
+    pub status: String,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticsBundle {
     pub generated_at: String,
     pub app_version: String,
@@ -322,4 +538,11 @@ pub struct DiagnosticsBundle {
     pub health: HealthReport,
     pub downloads: Vec<TorrentDownloadRecord>,
     pub logs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsPaths {
+    pub data_dir: String,
+    pub log_path: String,
 }
